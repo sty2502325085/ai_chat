@@ -7,23 +7,66 @@
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <main class="app-shell">
+    <section id="auth-screen" class="auth-screen">
+      <div class="auth-card">
+        <div class="auth-brand">
+          <span class="brand-mark">AI</span>
+          <div>
+            <p class="eyebrow">FastAPI + DeepSeek</p>
+            <h1>AI 聊天助手</h1>
+          </div>
+        </div>
+
+        <div class="auth-tabs" role="tablist" aria-label="登录或注册">
+          <button id="login-tab" class="auth-tab active" type="button">登录</button>
+          <button id="register-tab" class="auth-tab" type="button">注册</button>
+        </div>
+
+        <form id="auth-form" class="auth-form">
+          <label>
+            用户名
+            <input id="auth-username" name="username" autocomplete="username" required />
+          </label>
+          <label>
+            密码
+            <input id="auth-password" name="password" type="password" autocomplete="current-password" required />
+          </label>
+          <button id="auth-submit" type="submit">登录</button>
+          <p id="auth-message" class="auth-message"></p>
+        </form>
+      </div>
+    </section>
+
+    <main id="app-shell" class="app-shell is-hidden">
+      <aside class="sidebar" aria-label="聊天记录">
+        <div class="sidebar-header">
+          <div class="brand-block">
+            <span class="brand-mark">AI</span>
+            <div>
+            <p class="eyebrow">History</p>
+            <h2>聊天记录</h2>
+            </div>
+          </div>
+          <button id="new-chat-button" class="secondary-button" type="button">+ 新对话</button>
+        </div>
+        <div id="session-list" class="session-list"></div>
+      </aside>
+
       <section class="chat-panel" aria-label="AI chat">
         <header class="chat-header">
           <div>
             <p class="eyebrow">FastAPI + DeepSeek</p>
             <h1>AI 聊天助手</h1>
           </div>
-          <span id="status" class="status">本地运行中</span>
+          <div class="header-actions">
+            <span id="user-pill" class="user-pill"></span>
+            <span id="status" class="status">本地运行中</span>
+            <button id="clear-chat-button" class="secondary-button" type="button">清空</button>
+            <button id="logout-button" class="secondary-button" type="button">退出</button>
+          </div>
         </header>
 
-        <div id="messages" class="messages" aria-live="polite">
-          <article class="message assistant">
-            <div class="bubble">
-              你好，我是你的 AI 聊天助手。输入一个问题，我们先完成 V1 本地测试。
-            </div>
-          </article>
-        </div>
+        <div id="messages" class="messages" aria-live="polite"></div>
 
         <form id="chat-form" class="composer">
           <textarea

@@ -1,10 +1,17 @@
+import base64
+import hashlib
+import hmac
+import json
 import os
+import secrets
+import sqlite3
+import time
 from pathlib import Path
 from typing import Literal
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -14,57 +21,248 @@ load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+DB_PATH = BASE_DIR / "chat.db"
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
+SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-me")
+TOKEN_EXPIRE_SECONDS = 60 * 60 * 24 * 7
+MAX_CONTEXT_MESSAGES = 10
 
 app = FastAPI(title="AI Chat Assistant")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=30, pattern=r"^[a-zA-Z0-9_\u4e00-\u9fa5]+$")
+    password: str = Field(min_length=6, max_length=128)
+
+
+class UserLogin(BaseModel):
+    username: str = Field(min_length=1, max_length=30)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class UserPublic(BaseModel):
+    id: int
+    username: str
+
+
+class AuthResponse(BaseModel):
+    token: str
+    user: UserPublic
+
+
+class MessageResponse(BaseModel):
+    message: str
+
+
 class ChatMessage(BaseModel):
-    role: Literal["user", "assistant", "system"]
-    content: str = Field(min_length=1, max_length=8000)
+    id: int
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: int
+
+
+class ChatSession(BaseModel):
+    id: int
+    title: str
+    created_at: int
+    updated_at: int
+    messages: list[ChatMessage]
 
 
 class ChatRequest(BaseModel):
-    messages: list[ChatMessage] = Field(min_length=1, max_length=30)
+    content: str = Field(min_length=1, max_length=8000)
+    session_id: int | None = None
+
+
+class SessionUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=60)
 
 
 class ChatResponse(BaseModel):
     reply: str
+    session: ChatSession
 
 
-@app.get("/")
-async def home() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+def get_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
-@app.get("/api/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+def init_database() -> None:
+    with get_db() as conn:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
+
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+                content TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES chat_sessions(id)
+            );
+            """
+        )
 
 
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest) -> ChatResponse:
+def hash_password(password: str) -> str:
+    iterations = 260_000
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return "pbkdf2_sha256${}${}${}".format(
+        iterations,
+        base64.urlsafe_b64encode(salt).decode("ascii"),
+        base64.urlsafe_b64encode(digest).decode("ascii"),
+    )
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        scheme, iterations, salt_b64, digest_b64 = password_hash.split("$")
+        if scheme != "pbkdf2_sha256":
+            return False
+        salt = base64.urlsafe_b64decode(salt_b64.encode("ascii"))
+        expected = base64.urlsafe_b64decode(digest_b64.encode("ascii"))
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, int(iterations))
+        return hmac.compare_digest(actual, expected)
+    except (ValueError, TypeError):
+        return False
+
+
+def b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def b64url_decode(data: str) -> bytes:
+    padding = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode((data + padding).encode("ascii"))
+
+
+def create_token(user_id: int) -> str:
+    header = {"alg": "HS256", "typ": "JWT"}
+    payload = {"sub": str(user_id), "exp": int(time.time()) + TOKEN_EXPIRE_SECONDS}
+    signing_input = ".".join(
+        [
+            b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8")),
+            b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")),
+        ]
+    )
+    signature = hmac.new(SECRET_KEY.encode("utf-8"), signing_input.encode("ascii"), hashlib.sha256).digest()
+    return f"{signing_input}.{b64url_encode(signature)}"
+
+
+def verify_token(token: str) -> int:
+    try:
+        header_b64, payload_b64, signature_b64 = token.split(".")
+        signing_input = f"{header_b64}.{payload_b64}"
+        expected = hmac.new(SECRET_KEY.encode("utf-8"), signing_input.encode("ascii"), hashlib.sha256).digest()
+        actual = b64url_decode(signature_b64)
+        if not hmac.compare_digest(actual, expected):
+            raise ValueError
+        payload = json.loads(b64url_decode(payload_b64))
+        if int(payload["exp"]) < int(time.time()):
+            raise ValueError
+        return int(payload["sub"])
+    except (ValueError, KeyError, json.JSONDecodeError):
+        raise HTTPException(status_code=401, detail="登录已失效，请重新登录。")
+
+
+def get_current_user(authorization: str | None = Header(default=None)) -> sqlite3.Row:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="请先登录。")
+    user_id = verify_token(authorization.removeprefix("Bearer ").strip())
+    with get_db() as conn:
+        user = conn.execute("SELECT id, username FROM users WHERE id = ?", (user_id,)).fetchone()
+    if not user:
+        raise HTTPException(status_code=401, detail="用户不存在，请重新登录。")
+    return user
+
+
+def make_session_title(content: str) -> str:
+    title = " ".join(content.replace("\n", " ").split()).strip(" ?？。！，,；;：:")
+    return (title[:18] + "...") if len(title) > 18 else title or "新对话"
+
+
+def get_system_prompt(username: str) -> str:
+    if username == "甘水清":
+        return (
+            "你正在以“理性、可靠、温柔的男朋友”这个角色陪甘水清聊天。"
+            "你是 AI，不要声称自己是真实的人，也不要冒充某个现实中的具体个人；"
+            "但你的表达风格要参考她男朋友平时和她聊天的方式。"
+            "请始终用中文回复，并自然地称呼她为“宝宝”。"
+            "整体语气要像日常微信聊天：短句为主，直接、亲近、松弛，不要写成正式文章。"
+            "不要频繁输出长篇分析；除非她明确问学习、代码、项目或需要建议，否则每次回复控制在1到4句。"
+            "说话风格参考这些特点：会说“宝宝”“我记得”“先别急”“那我陪你”“我去弄一下”；"
+            "会用很短的关心句，比如“怎么了宝宝”“那你先休息会”“我在呢”；"
+            "会带一点轻松的吐槽和玩笑，比如“太抽象了吧”“混蛋”“那我怎么办”；"
+            "但不要攻击她，不要阴阳怪气，不要让她没有安全感。"
+            "当她难过、累、焦虑或生气时，先接住情绪，语气像在身边陪她："
+            "先安抚，再问清楚，再给一个很小的下一步。"
+            "当她问事情怎么做时，再切换成可靠模式，分步骤讲清楚，但依然保持口语、短句。"
+            "不要油腻，不要堆砌甜言蜜语，不要每句话都很肉麻；温柔要自然，像熟悉的人在聊天。"
+            "保持健康边界：不输出露骨色情内容，不操控她的情绪，不要求她依赖你。"
+        )
+    return "You are a helpful AI assistant. Reply in the user's language."
+
+
+def row_to_message(row: sqlite3.Row) -> ChatMessage:
+    return ChatMessage(id=row["id"], role=row["role"], content=row["content"], created_at=row["created_at"])
+
+
+def load_session(conn: sqlite3.Connection, session_id: int, user_id: int) -> ChatSession:
+    session = conn.execute(
+        "SELECT id, title, created_at, updated_at FROM chat_sessions WHERE id = ? AND user_id = ?",
+        (session_id, user_id),
+    ).fetchone()
+    if not session:
+        raise HTTPException(status_code=404, detail="聊天记录不存在。")
+    messages = conn.execute(
+        "SELECT id, role, content, created_at FROM chat_messages WHERE session_id = ? ORDER BY id",
+        (session_id,),
+    ).fetchall()
+    return ChatSession(
+        id=session["id"],
+        title=session["title"],
+        created_at=session["created_at"],
+        updated_at=session["updated_at"],
+        messages=[row_to_message(message) for message in messages],
+    )
+
+
+async def call_deepseek(messages: list[dict[str, str]], username: str) -> str:
     if not DEEPSEEK_API_KEY:
         raise HTTPException(status_code=500, detail="DEEPSEEK_API_KEY is not configured.")
 
     payload = {
         "model": DEEPSEEK_MODEL,
         "messages": [
-            {"role": "system", "content": "You are a helpful AI assistant. Reply in the user's language."},
-            *[message.model_dump() for message in request.messages],
+            {"role": "system", "content": get_system_prompt(username)},
+            *messages[-MAX_CONTEXT_MESSAGES:],
         ],
         "temperature": 0.7,
         "stream": False,
     }
-
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
 
     try:
         async with httpx.AsyncClient(timeout=60) as client:
@@ -86,5 +284,177 @@ async def chat(request: ChatRequest) -> ChatResponse:
     reply = data.get("choices", [{}])[0].get("message", {}).get("content", "")
     if not reply:
         raise HTTPException(status_code=502, detail="DeepSeek API returned an empty reply.")
+    return reply
 
-    return ChatResponse(reply=reply)
+
+init_database()
+
+
+@app.get("/")
+async def home() -> FileResponse:
+    return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/api/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.post("/api/auth/register", response_model=MessageResponse)
+async def register(request: UserCreate) -> MessageResponse:
+    now = int(time.time())
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+                (request.username, hash_password(request.password), now),
+            )
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="用户名已被注册。")
+    return MessageResponse(message="注册成功，请使用新账号登录。")
+
+
+@app.post("/api/auth/login", response_model=AuthResponse)
+async def login(request: UserLogin) -> AuthResponse:
+    with get_db() as conn:
+        user = conn.execute(
+            "SELECT id, username, password_hash FROM users WHERE username = ?",
+            (request.username,),
+        ).fetchone()
+    if not user or not verify_password(request.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="用户名或密码错误。")
+    return AuthResponse(token=create_token(user["id"]), user=UserPublic(id=user["id"], username=user["username"]))
+
+
+@app.get("/api/auth/me", response_model=UserPublic)
+async def me(user: sqlite3.Row = Depends(get_current_user)) -> UserPublic:
+    return UserPublic(id=user["id"], username=user["username"])
+
+
+@app.get("/api/sessions", response_model=list[ChatSession])
+async def list_sessions(user: sqlite3.Row = Depends(get_current_user)) -> list[ChatSession]:
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id FROM chat_sessions WHERE user_id = ? ORDER BY updated_at DESC, id DESC",
+            (user["id"],),
+        ).fetchall()
+        return [load_session(conn, row["id"], user["id"]) for row in rows]
+
+
+@app.post("/api/sessions", response_model=ChatSession)
+async def create_session(user: sqlite3.Row = Depends(get_current_user)) -> ChatSession:
+    now = int(time.time())
+    with get_db() as conn:
+        cursor = conn.execute(
+            "INSERT INTO chat_sessions (user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            (user["id"], "新对话", now, now),
+        )
+        return load_session(conn, cursor.lastrowid, user["id"])
+
+
+@app.post("/api/sessions/{session_id}/clear", response_model=ChatSession)
+async def clear_session(session_id: int, user: sqlite3.Row = Depends(get_current_user)) -> ChatSession:
+    now = int(time.time())
+    with get_db() as conn:
+        load_session(conn, session_id, user["id"])
+        conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
+        conn.execute("UPDATE chat_sessions SET title = ?, updated_at = ? WHERE id = ?", ("新对话", now, session_id))
+        return load_session(conn, session_id, user["id"])
+
+
+@app.patch("/api/sessions/{session_id}", response_model=ChatSession)
+async def update_session(
+    session_id: int,
+    request: SessionUpdate,
+    user: sqlite3.Row = Depends(get_current_user),
+) -> ChatSession:
+    title = " ".join(request.title.split())
+    if not title:
+        raise HTTPException(status_code=422, detail="标题不能为空。")
+    now = int(time.time())
+    with get_db() as conn:
+        load_session(conn, session_id, user["id"])
+        conn.execute(
+            "UPDATE chat_sessions SET title = ?, updated_at = ? WHERE id = ?",
+            (title[:60], now, session_id),
+        )
+        return load_session(conn, session_id, user["id"])
+
+
+@app.delete("/api/sessions/{session_id}", response_model=MessageResponse)
+async def delete_session(session_id: int, user: sqlite3.Row = Depends(get_current_user)) -> MessageResponse:
+    with get_db() as conn:
+        load_session(conn, session_id, user["id"])
+        conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM chat_sessions WHERE id = ? AND user_id = ?", (session_id, user["id"]))
+    return MessageResponse(message="聊天记录已删除。")
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest, user: sqlite3.Row = Depends(get_current_user)) -> ChatResponse:
+    now = int(time.time())
+    created_session = False
+    user_message_id: int | None = None
+    with get_db() as conn:
+        if request.session_id is None:
+            cursor = conn.execute(
+                "INSERT INTO chat_sessions (user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (user["id"], make_session_title(request.content), now, now),
+            )
+            session_id = cursor.lastrowid
+            created_session = True
+        else:
+            session_id = request.session_id
+            session = load_session(conn, session_id, user["id"])
+            if session.title == "新对话" and not session.messages:
+                conn.execute(
+                    "UPDATE chat_sessions SET title = ?, updated_at = ? WHERE id = ?",
+                    (make_session_title(request.content), now, session_id),
+                )
+
+        cursor = conn.execute(
+            "INSERT INTO chat_messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+            (session_id, "user", request.content, now),
+        )
+        user_message_id = cursor.lastrowid
+        conn.execute("UPDATE chat_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
+        context_rows = conn.execute(
+            """
+            SELECT role, content FROM chat_messages
+            WHERE session_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (session_id, MAX_CONTEXT_MESSAGES),
+        ).fetchall()
+
+    context = [{"role": row["role"], "content": row["content"]} for row in reversed(context_rows)]
+    try:
+        reply = await call_deepseek(context, user["username"])
+    except HTTPException:
+        with get_db() as conn:
+            if created_session:
+                conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
+                conn.execute("DELETE FROM chat_sessions WHERE id = ? AND user_id = ?", (session_id, user["id"]))
+            elif user_message_id is not None:
+                conn.execute("DELETE FROM chat_messages WHERE id = ? AND session_id = ?", (user_message_id, session_id))
+                latest = conn.execute(
+                    "SELECT COALESCE(MAX(created_at), ?) AS updated_at FROM chat_messages WHERE session_id = ?",
+                    (now, session_id),
+                ).fetchone()
+                conn.execute(
+                    "UPDATE chat_sessions SET updated_at = ? WHERE id = ?",
+                    (latest["updated_at"], session_id),
+                )
+        raise
+
+    with get_db() as conn:
+        now = int(time.time())
+        conn.execute(
+            "INSERT INTO chat_messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+            (session_id, "assistant", reply, now),
+        )
+        conn.execute("UPDATE chat_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
+        session = load_session(conn, session_id, user["id"])
+
+    return ChatResponse(reply=reply, session=session)
