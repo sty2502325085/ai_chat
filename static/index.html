@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Chat Assistant</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="chat-panel" aria-label="AI chat">
+        <header class="chat-header">
+          <div>
+            <p class="eyebrow">FastAPI + DeepSeek</p>
+            <h1>AI 聊天助手</h1>
+          </div>
+          <span id="status" class="status">本地运行中</span>
+        </header>
+
+        <div id="messages" class="messages" aria-live="polite">
+          <article class="message assistant">
+            <div class="bubble">
+              你好，我是你的 AI 聊天助手。输入一个问题，我们先完成 V1 本地测试。
+            </div>
+          </article>
+        </div>
+
+        <form id="chat-form" class="composer">
+          <textarea
+            id="message-input"
+            name="message"
+            rows="2"
+            placeholder="输入你的问题，例如：什么是 Docker？"
+            autocomplete="off"
+            required
+          ></textarea>
+          <button id="send-button" type="submit">发送</button>
+        </form>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
