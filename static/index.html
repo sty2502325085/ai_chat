@@ -17,6 +17,14 @@
           </div>
         </div>
 
+        <div class="auth-cat-card" aria-label="灰白小猫">
+          <img src="/static/assets/cat-mascot.png" alt="灰白小猫插画角色" />
+          <div>
+            <p class="eyebrow">Cat Mode</p>
+            <strong>带着猫猫一起聊天</strong>
+          </div>
+        </div>
+
         <div class="auth-tabs" role="tablist" aria-label="登录或注册">
           <button id="login-tab" class="auth-tab active" type="button">登录</button>
           <button id="register-tab" class="auth-tab" type="button">注册</button>
@@ -60,11 +68,15 @@
           </div>
           <div class="header-actions">
             <span id="user-pill" class="user-pill"></span>
+            <span id="usage-pill" class="usage-pill"></span>
             <span id="status" class="status">本地运行中</span>
+            <button id="admin-button" class="secondary-button is-hidden" type="button">后台</button>
             <button id="clear-chat-button" class="secondary-button" type="button">清空</button>
             <button id="logout-button" class="secondary-button" type="button">退出</button>
           </div>
         </header>
+
+        <img class="chat-cat-decoration" src="/static/assets/cat-mascot.png" alt="" aria-hidden="true" />
 
         <div id="messages" class="messages" aria-live="polite"></div>
 

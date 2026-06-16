@@ -29,6 +29,9 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-me")
 TOKEN_EXPIRE_SECONDS = 60 * 60 * 24 * 7
 MAX_CONTEXT_MESSAGES = 10
+DAILY_MESSAGE_LIMIT = int(os.getenv("DAILY_MESSAGE_LIMIT", "50"))
+UNLIMITED_USERS = {"甘水清"}
+ADMIN_USERS = {name.strip() for name in os.getenv("ADMIN_USERS", "sty2502325085,admin").split(",") if name.strip()}
 
 app = FastAPI(title="AI Chat Assistant")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -47,11 +50,22 @@ class UserLogin(BaseModel):
 class UserPublic(BaseModel):
     id: int
     username: str
+    is_admin: bool = False
+    is_disabled: bool = False
+
+
+class UsageStatus(BaseModel):
+    date: str
+    used: int
+    limit: int | None
+    remaining: int | None
+    unlimited: bool
 
 
 class AuthResponse(BaseModel):
     token: str
     user: UserPublic
+    usage: UsageStatus
 
 
 class MessageResponse(BaseModel):
@@ -87,6 +101,40 @@ class ChatResponse(BaseModel):
     session: ChatSession
 
 
+class AdminUserRow(BaseModel):
+    id: int
+    username: str
+    created_at: int
+    session_count: int
+    message_count: int
+    today_used: int
+    daily_limit: int | None
+    remaining: int | None
+    unlimited: bool
+    is_admin: bool
+    is_disabled: bool
+    limit_override: int | None
+
+
+class AdminStats(BaseModel):
+    user_count: int
+    session_count: int
+    message_count: int
+    today_used: int
+    daily_limit: int
+    users: list[AdminUserRow]
+
+
+class AdminUserUpdate(BaseModel):
+    is_disabled: bool | None = None
+    daily_limit_override: int | None = Field(default=None, ge=0, le=10000)
+
+
+class AdminUserDetail(BaseModel):
+    user: AdminUserRow
+    sessions: list[ChatSession]
+
+
 def get_db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -101,7 +149,9 @@ def init_database() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                is_disabled INTEGER NOT NULL DEFAULT 0,
+                daily_limit_override INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS chat_sessions (
@@ -121,8 +171,21 @@ def init_database() -> None:
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES chat_sessions(id)
             );
+
+            CREATE TABLE IF NOT EXISTS usage_limits (
+                user_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, date),
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            );
             """
         )
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "is_disabled" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN is_disabled INTEGER NOT NULL DEFAULT 0")
+        if "daily_limit_override" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN daily_limit_override INTEGER")
 
 
 def hash_password(password: str) -> str:
@@ -192,10 +255,72 @@ def get_current_user(authorization: str | None = Header(default=None)) -> sqlite
         raise HTTPException(status_code=401, detail="请先登录。")
     user_id = verify_token(authorization.removeprefix("Bearer ").strip())
     with get_db() as conn:
-        user = conn.execute("SELECT id, username FROM users WHERE id = ?", (user_id,)).fetchone()
+        user = conn.execute(
+            "SELECT id, username, is_disabled, daily_limit_override FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
     if not user:
         raise HTTPException(status_code=401, detail="用户不存在，请重新登录。")
+    if user["is_disabled"]:
+        raise HTTPException(status_code=403, detail="账号已被禁用，请联系管理员。")
     return user
+
+
+def get_admin_user(user: sqlite3.Row = Depends(get_current_user)) -> sqlite3.Row:
+    if user["username"] not in ADMIN_USERS:
+        raise HTTPException(status_code=403, detail="没有管理员权限。")
+    return user
+
+
+def today_key() -> str:
+    return time.strftime("%Y-%m-%d", time.localtime())
+
+
+def get_usage_status(conn: sqlite3.Connection, user_id: int, username: str) -> UsageStatus:
+    date = today_key()
+    row = conn.execute(
+        "SELECT used FROM usage_limits WHERE user_id = ? AND date = ?",
+        (user_id, date),
+    ).fetchone()
+    used = row["used"] if row else 0
+    unlimited = username in UNLIMITED_USERS
+    user = conn.execute("SELECT daily_limit_override FROM users WHERE id = ?", (user_id,)).fetchone()
+    effective_limit = user["daily_limit_override"] if user and user["daily_limit_override"] is not None else DAILY_MESSAGE_LIMIT
+    limit = None if unlimited else effective_limit
+    remaining = None if unlimited else max(effective_limit - used, 0)
+    return UsageStatus(date=date, used=used, limit=limit, remaining=remaining, unlimited=unlimited)
+
+
+def ensure_usage_available(conn: sqlite3.Connection, user: sqlite3.Row) -> UsageStatus:
+    usage = get_usage_status(conn, user["id"], user["username"])
+    if not usage.unlimited and usage.remaining is not None and usage.remaining <= 0:
+        raise HTTPException(status_code=429, detail="今日 AI 对话次数已用完，请明天再试。")
+    return usage
+
+
+def increment_usage(conn: sqlite3.Connection, user: sqlite3.Row) -> UsageStatus:
+    if user["username"] in UNLIMITED_USERS:
+        return get_usage_status(conn, user["id"], user["username"])
+    date = today_key()
+    conn.execute(
+        """
+        INSERT INTO usage_limits (user_id, date, used)
+        VALUES (?, ?, 1)
+        ON CONFLICT(user_id, date)
+        DO UPDATE SET used = used + 1
+        """,
+        (user["id"], date),
+    )
+    return get_usage_status(conn, user["id"], user["username"])
+
+
+def to_public_user(user: sqlite3.Row) -> UserPublic:
+    return UserPublic(
+        id=user["id"],
+        username=user["username"],
+        is_admin=user["username"] in ADMIN_USERS,
+        is_disabled=bool(user["is_disabled"]),
+    )
 
 
 def make_session_title(content: str) -> str:
@@ -295,6 +420,11 @@ async def home() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/admin")
+async def admin_home() -> FileResponse:
+    return FileResponse(STATIC_DIR / "admin.html")
+
+
 @app.get("/api/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -318,17 +448,195 @@ async def register(request: UserCreate) -> MessageResponse:
 async def login(request: UserLogin) -> AuthResponse:
     with get_db() as conn:
         user = conn.execute(
-            "SELECT id, username, password_hash FROM users WHERE username = ?",
+            "SELECT id, username, password_hash, is_disabled, daily_limit_override FROM users WHERE username = ?",
             (request.username,),
         ).fetchone()
     if not user or not verify_password(request.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="用户名或密码错误。")
-    return AuthResponse(token=create_token(user["id"]), user=UserPublic(id=user["id"], username=user["username"]))
+    if user["is_disabled"]:
+        raise HTTPException(status_code=403, detail="账号已被禁用，请联系管理员。")
+    with get_db() as conn:
+        usage = get_usage_status(conn, user["id"], user["username"])
+    return AuthResponse(
+        token=create_token(user["id"]),
+        user=to_public_user(user),
+        usage=usage,
+    )
 
 
 @app.get("/api/auth/me", response_model=UserPublic)
 async def me(user: sqlite3.Row = Depends(get_current_user)) -> UserPublic:
-    return UserPublic(id=user["id"], username=user["username"])
+    return to_public_user(user)
+
+
+@app.get("/api/usage", response_model=UsageStatus)
+async def usage(user: sqlite3.Row = Depends(get_current_user)) -> UsageStatus:
+    with get_db() as conn:
+        return get_usage_status(conn, user["id"], user["username"])
+
+
+@app.get("/api/admin/stats", response_model=AdminStats)
+async def admin_stats(user: sqlite3.Row = Depends(get_admin_user)) -> AdminStats:
+    date = today_key()
+    with get_db() as conn:
+        user_count = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
+        session_count = conn.execute("SELECT COUNT(*) AS count FROM chat_sessions").fetchone()["count"]
+        message_count = conn.execute("SELECT COUNT(*) AS count FROM chat_messages").fetchone()["count"]
+        today_used = conn.execute(
+            "SELECT COALESCE(SUM(used), 0) AS count FROM usage_limits WHERE date = ?",
+            (date,),
+        ).fetchone()["count"]
+        rows = conn.execute(
+            """
+            SELECT
+                users.id,
+                users.username,
+                users.created_at,
+                users.is_disabled,
+                users.daily_limit_override,
+                COUNT(DISTINCT chat_sessions.id) AS session_count,
+                COUNT(chat_messages.id) AS message_count,
+                COALESCE(usage_limits.used, 0) AS today_used
+            FROM users
+            LEFT JOIN chat_sessions ON chat_sessions.user_id = users.id
+            LEFT JOIN chat_messages ON chat_messages.session_id = chat_sessions.id
+            LEFT JOIN usage_limits ON usage_limits.user_id = users.id AND usage_limits.date = ?
+            GROUP BY users.id
+            ORDER BY users.created_at DESC, users.id DESC
+            """,
+            (date,),
+        ).fetchall()
+
+    users = []
+    for row in rows:
+        unlimited = row["username"] in UNLIMITED_USERS
+        effective_limit = row["daily_limit_override"] if row["daily_limit_override"] is not None else DAILY_MESSAGE_LIMIT
+        daily_limit = None if unlimited else effective_limit
+        remaining = None if unlimited else max(effective_limit - row["today_used"], 0)
+        users.append(
+            AdminUserRow(
+                id=row["id"],
+                username=row["username"],
+                created_at=row["created_at"],
+                session_count=row["session_count"],
+                message_count=row["message_count"],
+                today_used=row["today_used"],
+                daily_limit=daily_limit,
+                remaining=remaining,
+                unlimited=unlimited,
+                is_admin=row["username"] in ADMIN_USERS,
+                is_disabled=bool(row["is_disabled"]),
+                limit_override=row["daily_limit_override"],
+            )
+        )
+
+    return AdminStats(
+        user_count=user_count,
+        session_count=session_count,
+        message_count=message_count,
+        today_used=today_used,
+        daily_limit=DAILY_MESSAGE_LIMIT,
+        users=users,
+    )
+
+
+def get_admin_user_row(conn: sqlite3.Connection, user_id: int) -> AdminUserRow:
+    date = today_key()
+    row = conn.execute(
+        """
+        SELECT
+            users.id,
+            users.username,
+            users.created_at,
+            users.is_disabled,
+            users.daily_limit_override,
+            COUNT(DISTINCT chat_sessions.id) AS session_count,
+            COUNT(chat_messages.id) AS message_count,
+            COALESCE(usage_limits.used, 0) AS today_used
+        FROM users
+        LEFT JOIN chat_sessions ON chat_sessions.user_id = users.id
+        LEFT JOIN chat_messages ON chat_messages.session_id = chat_sessions.id
+        LEFT JOIN usage_limits ON usage_limits.user_id = users.id AND usage_limits.date = ?
+        WHERE users.id = ?
+        GROUP BY users.id
+        """,
+        (date, user_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="用户不存在。")
+    unlimited = row["username"] in UNLIMITED_USERS
+    effective_limit = row["daily_limit_override"] if row["daily_limit_override"] is not None else DAILY_MESSAGE_LIMIT
+    daily_limit = None if unlimited else effective_limit
+    remaining = None if unlimited else max(effective_limit - row["today_used"], 0)
+    return AdminUserRow(
+        id=row["id"],
+        username=row["username"],
+        created_at=row["created_at"],
+        session_count=row["session_count"],
+        message_count=row["message_count"],
+        today_used=row["today_used"],
+        daily_limit=daily_limit,
+        remaining=remaining,
+        unlimited=unlimited,
+        is_admin=row["username"] in ADMIN_USERS,
+        is_disabled=bool(row["is_disabled"]),
+        limit_override=row["daily_limit_override"],
+    )
+
+
+@app.patch("/api/admin/users/{user_id}", response_model=AdminUserRow)
+async def admin_update_user(
+    user_id: int,
+    request: AdminUserUpdate,
+    admin: sqlite3.Row = Depends(get_admin_user),
+) -> AdminUserRow:
+    with get_db() as conn:
+        target = conn.execute("SELECT id, username FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="用户不存在。")
+        if request.is_disabled is True and target["id"] == admin["id"]:
+            raise HTTPException(status_code=400, detail="不能禁用当前登录的管理员账号。")
+        if request.is_disabled is not None:
+            conn.execute(
+                "UPDATE users SET is_disabled = ? WHERE id = ?",
+                (1 if request.is_disabled else 0, user_id),
+            )
+        if request.daily_limit_override is not None:
+            conn.execute(
+                "UPDATE users SET daily_limit_override = ? WHERE id = ?",
+                (request.daily_limit_override, user_id),
+            )
+        return get_admin_user_row(conn, user_id)
+
+
+@app.delete("/api/admin/users/{user_id}/limit", response_model=AdminUserRow)
+async def admin_clear_user_limit(
+    user_id: int,
+    admin: sqlite3.Row = Depends(get_admin_user),
+) -> AdminUserRow:
+    with get_db() as conn:
+        conn.execute("UPDATE users SET daily_limit_override = NULL WHERE id = ?", (user_id,))
+        return get_admin_user_row(conn, user_id)
+
+
+@app.get("/api/admin/users/{user_id}", response_model=AdminUserDetail)
+async def admin_user_detail(
+    user_id: int,
+    admin: sqlite3.Row = Depends(get_admin_user),
+) -> AdminUserDetail:
+    with get_db() as conn:
+        user = get_admin_user_row(conn, user_id)
+        rows = conn.execute(
+            """
+            SELECT id FROM chat_sessions
+            WHERE user_id = ?
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 5
+            """,
+            (user_id,),
+        ).fetchall()
+        sessions = [load_session(conn, row["id"], user_id) for row in rows]
+    return AdminUserDetail(user=user, sessions=sessions)
 
 
 @app.get("/api/sessions", response_model=list[ChatSession])
@@ -396,6 +704,7 @@ async def chat(request: ChatRequest, user: sqlite3.Row = Depends(get_current_use
     created_session = False
     user_message_id: int | None = None
     with get_db() as conn:
+        ensure_usage_available(conn, user)
         if request.session_id is None:
             cursor = conn.execute(
                 "INSERT INTO chat_sessions (user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
@@ -455,6 +764,7 @@ async def chat(request: ChatRequest, user: sqlite3.Row = Depends(get_current_use
             (session_id, "assistant", reply, now),
         )
         conn.execute("UPDATE chat_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
+        increment_usage(conn, user)
         session = load_session(conn, session_id, user["id"])
 
     return ChatResponse(reply=reply, session=session)

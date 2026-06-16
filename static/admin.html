@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI Chat Admin</title>
+    <link rel="stylesheet" href="/static/admin.css" />
+  </head>
+  <body>
+    <main class="admin-shell">
+      <section id="login-panel" class="login-panel">
+        <div class="brand">
+          <span class="brand-mark">AI</span>
+          <div>
+            <p>Admin</p>
+            <h1 id="access-title">需要管理员权限</h1>
+          </div>
+        </div>
+        <form id="login-form" class="login-form">
+          <button type="submit">回到聊天页登录</button>
+          <p id="login-message" class="message"></p>
+        </form>
+      </section>
+
+      <section id="dashboard" class="dashboard is-hidden">
+        <header class="dashboard-header">
+          <div>
+            <p>Admin Dashboard</p>
+            <h1>AI 聊天助手后台</h1>
+          </div>
+          <div class="header-actions">
+            <span id="admin-user" class="admin-user"></span>
+            <button id="refresh-button" type="button">刷新</button>
+            <button id="logout-button" type="button">退出</button>
+          </div>
+        </header>
+
+        <section class="stats-grid" aria-label="统计概览">
+          <article class="stat-card">
+            <span>用户数量</span>
+            <strong id="user-count">0</strong>
+          </article>
+          <article class="stat-card">
+            <span>聊天会话</span>
+            <strong id="session-count">0</strong>
+          </article>
+          <article class="stat-card">
+            <span>消息总数</span>
+            <strong id="message-count">0</strong>
+          </article>
+          <article class="stat-card">
+            <span>今日调用</span>
+            <strong id="today-used">0</strong>
+          </article>
+        </section>
+
+        <section class="table-panel">
+          <div class="panel-header">
+            <div>
+              <p>Users</p>
+              <h2>用户使用情况</h2>
+            </div>
+            <span id="limit-label"></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>用户</th>
+                  <th>注册时间</th>
+                  <th>会话</th>
+                  <th>消息</th>
+                  <th>今日使用</th>
+                  <th>剩余次数</th>
+                  <th>权限</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="user-table"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="detail-panel" class="detail-panel is-hidden">
+          <div class="panel-header">
+            <div>
+              <p>User Detail</p>
+              <h2 id="detail-title">最近聊天记录</h2>
+            </div>
+            <button id="close-detail-button" type="button">关闭</button>
+          </div>
+          <div id="detail-content" class="detail-content"></div>
+        </section>
+      </section>
+
+      <div id="limit-modal" class="modal-backdrop is-hidden">
+        <form id="limit-form" class="modal-card">
+          <h2>修改每日额度</h2>
+          <p id="limit-modal-user"></p>
+          <label>
+            每日额度
+            <input id="limit-input" type="number" min="0" max="10000" step="1" required />
+          </label>
+          <div class="modal-actions">
+            <button id="limit-cancel-button" type="button">取消</button>
+            <button type="submit">保存</button>
+          </div>
+        </form>
+      </div>
+    </main>
+
+    <script src="/static/admin.js"></script>
+  </body>
+</html>

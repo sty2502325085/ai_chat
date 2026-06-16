@@ -17,7 +17,9 @@ const sessionListEl = document.querySelector("#session-list");
 const newChatButton = document.querySelector("#new-chat-button");
 const clearChatButton = document.querySelector("#clear-chat-button");
 const logoutButton = document.querySelector("#logout-button");
+const adminButton = document.querySelector("#admin-button");
 const userPill = document.querySelector("#user-pill");
+const usagePill = document.querySelector("#usage-pill");
 
 const TOKEN_KEY = "ai-chat-token";
 const USER_KEY = "ai-chat-user";
@@ -31,6 +33,7 @@ let token = localStorage.getItem(TOKEN_KEY);
 let currentUser = loadSavedUser();
 let sessions = [];
 let activeSessionId = null;
+let usageStatus = null;
 
 function loadSavedUser() {
   try {
@@ -76,12 +79,29 @@ function showApp() {
   authScreen.classList.add("is-hidden");
   appShell.classList.remove("is-hidden");
   userPill.textContent = currentUser ? currentUser.username : "";
+  adminButton.classList.toggle("is-hidden", !currentUser?.is_admin);
+  renderUsage();
   input.focus();
 }
 
 function setStatus(text, isError = false) {
   statusEl.textContent = text;
   statusEl.classList.toggle("error", isError);
+}
+
+function renderUsage() {
+  if (!usagePill) return;
+  if (!usageStatus) {
+    usagePill.textContent = "";
+    return;
+  }
+  if (usageStatus.unlimited) {
+    usagePill.textContent = "今日不限次数";
+    usagePill.classList.add("unlimited");
+    return;
+  }
+  usagePill.classList.remove("unlimited");
+  usagePill.textContent = `今日剩余 ${usageStatus.remaining}/${usageStatus.limit}`;
 }
 
 async function api(path, options = {}) {
@@ -218,6 +238,11 @@ async function loadSessions() {
   render();
 }
 
+async function loadUsage() {
+  usageStatus = await api("/api/usage");
+  renderUsage();
+}
+
 async function sendMessage(content) {
   sendButton.disabled = true;
   input.disabled = true;
@@ -232,6 +257,7 @@ async function sendMessage(content) {
     });
     typingMessage.remove();
     upsertSession(data.session);
+    await loadUsage();
     render();
     setStatus("本地运行中");
   } catch (error) {
@@ -271,9 +297,11 @@ authForm.addEventListener("submit", async (event) => {
     }
 
     saveAuth(data);
+    usageStatus = data.usage || null;
     authPassword.value = "";
     showApp();
     await loadSessions();
+    await loadUsage();
     setStatus("本地运行中");
   } catch (error) {
     authMessage.textContent = error.message;
@@ -388,8 +416,13 @@ clearChatButton.addEventListener("click", async () => {
 
 logoutButton.addEventListener("click", () => {
   clearAuth();
+  usageStatus = null;
   render();
   showAuth("已退出登录。");
+});
+
+adminButton.addEventListener("click", () => {
+  window.location.href = "/admin";
 });
 
 loginTab.addEventListener("click", () => setAuthMode("login"));
@@ -406,6 +439,7 @@ async function boot() {
     currentUser = await api("/api/auth/me");
     localStorage.setItem(USER_KEY, JSON.stringify(currentUser));
     showApp();
+    await loadUsage();
     await loadSessions();
   } catch {
     clearAuth();

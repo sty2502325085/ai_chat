@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: ai-chat
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: DEEPSEEK_MODEL
+        value: deepseek-chat
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DAILY_MESSAGE_LIMIT
+        value: 50
+      - key: ADMIN_USERS
+        value: sty2502325085,admin
