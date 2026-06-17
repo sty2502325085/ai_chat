@@ -512,6 +512,28 @@ def cleanup_failed_chat(
             )
 
 
+def safe_cleanup_failed_chat(
+    *,
+    created_session: bool,
+    session_id: int | None,
+    user_id: int,
+    user_message_id: int | None,
+    fallback_updated_at: int,
+) -> None:
+    if session_id is None:
+        return
+    try:
+        cleanup_failed_chat(
+            created_session=created_session,
+            session_id=session_id,
+            user_id=user_id,
+            user_message_id=user_message_id,
+            fallback_updated_at=fallback_updated_at,
+        )
+    except Exception:
+        pass
+
+
 init_database()
 
 
@@ -813,46 +835,47 @@ async def delete_session(session_id: int, user: sqlite3.Row = Depends(get_curren
 async def chat(request: ChatRequest, user: sqlite3.Row = Depends(get_current_user)) -> ChatResponse:
     now = int(time.time())
     created_session = False
+    session_id: int | None = None
     user_message_id: int | None = None
-    with get_db() as conn:
-        ensure_usage_available(conn, user)
-        if request.session_id is None:
-            session_id = insert_and_get_id(
-                conn,
-                "INSERT INTO chat_sessions (user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (user["id"], make_session_title(request.content), now, now),
-            )
-            created_session = True
-        else:
-            session_id = request.session_id
-            session = load_session(conn, session_id, user["id"])
-            if session.title == "新对话" and not session.messages:
-                conn.execute(
-                    "UPDATE chat_sessions SET title = ?, updated_at = ? WHERE id = ?",
-                    (make_session_title(request.content), now, session_id),
-                )
-
-        user_message_id = insert_and_get_id(
-            conn,
-            "INSERT INTO chat_messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-            (session_id, "user", request.content, now),
-        )
-        conn.execute("UPDATE chat_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
-        context_rows = conn.execute(
-            """
-            SELECT role, content FROM chat_messages
-            WHERE session_id = ?
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (session_id, MAX_CONTEXT_MESSAGES),
-        ).fetchall()
-
-    context = [{"role": row["role"], "content": row["content"]} for row in reversed(context_rows)]
     try:
+        with get_db() as conn:
+            ensure_usage_available(conn, user)
+            if request.session_id is None:
+                session_id = insert_and_get_id(
+                    conn,
+                    "INSERT INTO chat_sessions (user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                    (user["id"], make_session_title(request.content), now, now),
+                )
+                created_session = True
+            else:
+                session_id = request.session_id
+                session = load_session(conn, session_id, user["id"])
+                if session.title == "新对话" and not session.messages:
+                    conn.execute(
+                        "UPDATE chat_sessions SET title = ?, updated_at = ? WHERE id = ?",
+                        (make_session_title(request.content), now, session_id),
+                    )
+
+            user_message_id = insert_and_get_id(
+                conn,
+                "INSERT INTO chat_messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+                (session_id, "user", request.content, now),
+            )
+            conn.execute("UPDATE chat_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
+            context_rows = conn.execute(
+                """
+                SELECT role, content FROM chat_messages
+                WHERE session_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (session_id, MAX_CONTEXT_MESSAGES),
+            ).fetchall()
+
+        context = [{"role": row["role"], "content": row["content"]} for row in reversed(context_rows)]
         reply = await call_deepseek(context, user["username"])
     except HTTPException:
-        cleanup_failed_chat(
+        safe_cleanup_failed_chat(
             created_session=created_session,
             session_id=session_id,
             user_id=user["id"],
@@ -861,7 +884,7 @@ async def chat(request: ChatRequest, user: sqlite3.Row = Depends(get_current_use
         )
         raise
     except Exception as exc:
-        cleanup_failed_chat(
+        safe_cleanup_failed_chat(
             created_session=created_session,
             session_id=session_id,
             user_id=user["id"],
