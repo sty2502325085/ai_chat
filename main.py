@@ -96,6 +96,10 @@ class ChatRequest(BaseModel):
     session_id: int | None = None
 
 
+class SessionActionRequest(BaseModel):
+    session_id: int
+
+
 class SessionUpdate(BaseModel):
     title: str = Field(min_length=1, max_length=60)
 
@@ -452,6 +456,43 @@ def load_session(conn: DatabaseConnection, session_id: int, user_id: int) -> Cha
     )
 
 
+def load_context(conn: DatabaseConnection, session_id: int) -> list[dict[str, str]]:
+    rows = conn.execute(
+        """
+        SELECT role, content FROM chat_messages
+        WHERE session_id = ?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (session_id, MAX_CONTEXT_MESSAGES),
+    ).fetchall()
+    return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
+
+
+def find_last_assistant_message(conn: DatabaseConnection, session_id: int) -> Any | None:
+    return conn.execute(
+        """
+        SELECT id, role, content, created_at FROM chat_messages
+        WHERE session_id = ? AND role = 'assistant'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (session_id,),
+    ).fetchone()
+
+
+def find_last_user_message(conn: DatabaseConnection, session_id: int) -> Any | None:
+    return conn.execute(
+        """
+        SELECT id, role, content, created_at FROM chat_messages
+        WHERE session_id = ? AND role = 'user'
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (session_id,),
+    ).fetchone()
+
+
 async def call_deepseek(messages: list[dict[str, str]], username: str) -> str:
     if not DEEPSEEK_API_KEY:
         raise HTTPException(status_code=500, detail="DEEPSEEK_API_KEY is not configured.")
@@ -543,6 +584,17 @@ def safe_cleanup_failed_chat(
         )
     except Exception:
         pass
+
+
+def save_assistant_reply(conn: DatabaseConnection, session_id: int, user: sqlite3.Row, reply: str) -> ChatSession:
+    now = int(time.time())
+    increment_usage(conn, user)
+    conn.execute(
+        "INSERT INTO chat_messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+        (session_id, "assistant", reply, now),
+    )
+    conn.execute("UPDATE chat_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
+    return load_session(conn, session_id, user["id"])
 
 
 init_database()
@@ -873,17 +925,8 @@ async def chat(request: ChatRequest, user: sqlite3.Row = Depends(get_current_use
                 (session_id, "user", request.content, now),
             )
             conn.execute("UPDATE chat_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
-            context_rows = conn.execute(
-                """
-                SELECT role, content FROM chat_messages
-                WHERE session_id = ?
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (session_id, MAX_CONTEXT_MESSAGES),
-            ).fetchall()
+            context = load_context(conn, session_id)
 
-        context = [{"role": row["role"], "content": row["content"]} for row in reversed(context_rows)]
         reply = await call_deepseek(context, user["username"])
     except HTTPException:
         safe_cleanup_failed_chat(
@@ -906,14 +949,7 @@ async def chat(request: ChatRequest, user: sqlite3.Row = Depends(get_current_use
 
     try:
         with get_db() as conn:
-            now = int(time.time())
-            increment_usage(conn, user)
-            conn.execute(
-                "INSERT INTO chat_messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-                (session_id, "assistant", reply, now),
-            )
-            conn.execute("UPDATE chat_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
-            session = load_session(conn, session_id, user["id"])
+            session = save_assistant_reply(conn, session_id, user, reply)
     except HTTPException:
         safe_cleanup_failed_chat(
             created_session=created_session,
@@ -934,3 +970,67 @@ async def chat(request: ChatRequest, user: sqlite3.Row = Depends(get_current_use
         raise HTTPException(status_code=502, detail=f"聊天结果保存失败：{type(exc).__name__}") from exc
 
     return ChatResponse(reply=reply, session=session)
+
+
+@app.post("/api/chat/regenerate", response_model=ChatResponse)
+async def regenerate_chat(request: SessionActionRequest, user: sqlite3.Row = Depends(get_current_user)) -> ChatResponse:
+    assistant_message_id: int | None = None
+    try:
+        with get_db() as conn:
+            ensure_usage_available(conn, user)
+            load_session(conn, request.session_id, user["id"])
+            last_assistant = find_last_assistant_message(conn, request.session_id)
+            if not last_assistant:
+                raise HTTPException(status_code=400, detail="当前对话还没有可重新生成的 AI 回复。")
+            assistant_message_id = last_assistant["id"]
+            context_rows = conn.execute(
+                """
+                SELECT id, role, content FROM chat_messages
+                WHERE session_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (request.session_id, MAX_CONTEXT_MESSAGES),
+            ).fetchall()
+            context = [
+                {"role": row["role"], "content": row["content"]}
+                for row in reversed(context_rows)
+                if row["id"] != assistant_message_id
+            ]
+            if not any(message["role"] == "user" for message in context):
+                raise HTTPException(status_code=400, detail="当前对话没有可重新生成的问题。")
+
+        reply = await call_deepseek(context, user["username"])
+        with get_db() as conn:
+            conn.execute("DELETE FROM chat_messages WHERE id = ? AND session_id = ?", (assistant_message_id, request.session_id))
+            session = save_assistant_reply(conn, request.session_id, user, reply)
+        return ChatResponse(reply=reply, session=session)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"重新生成失败：{type(exc).__name__}") from exc
+
+
+@app.post("/api/chat/continue", response_model=ChatResponse)
+async def continue_chat(request: SessionActionRequest, user: sqlite3.Row = Depends(get_current_user)) -> ChatResponse:
+    try:
+        with get_db() as conn:
+            ensure_usage_available(conn, user)
+            load_session(conn, request.session_id, user["id"])
+            last_assistant = find_last_assistant_message(conn, request.session_id)
+            if not last_assistant:
+                raise HTTPException(status_code=400, detail="当前对话还没有可继续的 AI 回复。")
+            context = load_context(conn, request.session_id)
+
+        continue_instruction = {
+            "role": "user",
+            "content": "请接着上一条回答继续说，不要重复已经说过的内容。",
+        }
+        reply = await call_deepseek([*context, continue_instruction], user["username"])
+        with get_db() as conn:
+            session = save_assistant_reply(conn, request.session_id, user, reply)
+        return ChatResponse(reply=reply, session=session)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"继续回答失败：{type(exc).__name__}") from exc

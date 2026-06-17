@@ -170,7 +170,7 @@ function upsertSession(session) {
   activeSessionId = session.id;
 }
 
-function addMessage(role, content) {
+function addMessage(role, content, options = {}) {
   const item = document.createElement("article");
   item.className = `message ${role}`;
 
@@ -183,12 +183,32 @@ function addMessage(role, content) {
 
   contentWrap.appendChild(bubble);
   if (role === "assistant" && content) {
+    const tools = document.createElement("div");
+    tools.className = "message-tools";
+
+    if (options.canRegenerate) {
+      const regenerateButton = document.createElement("button");
+      regenerateButton.type = "button";
+      regenerateButton.className = "message-tool";
+      regenerateButton.dataset.action = "regenerate";
+      regenerateButton.textContent = "重新生成";
+      tools.appendChild(regenerateButton);
+
+      const continueButton = document.createElement("button");
+      continueButton.type = "button";
+      continueButton.className = "message-tool";
+      continueButton.dataset.action = "continue";
+      continueButton.textContent = "继续回答";
+      tools.appendChild(continueButton);
+    }
+
     const copyButton = document.createElement("button");
     copyButton.type = "button";
-    copyButton.className = "copy-button";
+    copyButton.className = "message-tool";
     copyButton.dataset.copy = content;
     copyButton.textContent = "复制";
-    contentWrap.appendChild(copyButton);
+    tools.appendChild(copyButton);
+    contentWrap.appendChild(tools);
   }
 
   item.appendChild(contentWrap);
@@ -217,8 +237,12 @@ function addTypingMessage() {
 function renderMessages() {
   const session = getActiveSession();
   messagesEl.innerHTML = "";
-  [WELCOME_MESSAGE, ...(session?.messages || [])].forEach((message) => {
-    addMessage(message.role, message.content);
+  const sessionMessages = session?.messages || [];
+  const lastAssistantId = [...sessionMessages].reverse().find((message) => message.role === "assistant")?.id;
+  [WELCOME_MESSAGE, ...sessionMessages].forEach((message) => {
+    addMessage(message.role, message.content, {
+      canRegenerate: Boolean(session && message.id && message.id === lastAssistantId),
+    });
   });
 }
 
@@ -290,6 +314,35 @@ async function sendMessage(content) {
     const data = await api("/api/chat", {
       method: "POST",
       body: JSON.stringify({ content, session_id: activeSessionId }),
+    });
+    typingMessage.remove();
+    upsertSession(data.session);
+    await loadUsage();
+    render();
+    setStatus("本地运行中");
+  } catch (error) {
+    typingMessage.remove();
+    addMessage("assistant", `出错了：${error.message}`);
+    setStatus("请求失败", true);
+  } finally {
+    sendButton.disabled = false;
+    input.disabled = false;
+    input.focus();
+  }
+}
+
+async function runAssistantAction(action) {
+  if (!activeSessionId) return;
+  sendButton.disabled = true;
+  input.disabled = true;
+  closeMoreMenu();
+  setStatus(action === "regenerate" ? "AI 重新生成中..." : "AI 继续回答中...");
+  const typingMessage = addTypingMessage();
+
+  try {
+    const data = await api(`/api/chat/${action}`, {
+      method: "POST",
+      body: JSON.stringify({ session_id: activeSessionId }),
     });
     typingMessage.remove();
     upsertSession(data.session);
@@ -384,6 +437,12 @@ sessionListEl.addEventListener("click", (event) => {
 });
 
 messagesEl.addEventListener("click", async (event) => {
+  const actionButton = event.target.closest("button[data-action]");
+  if (actionButton) {
+    await runAssistantAction(actionButton.dataset.action);
+    return;
+  }
+
   const button = event.target.closest("button[data-copy]");
   if (!button) return;
   try {

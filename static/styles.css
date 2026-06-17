@@ -565,7 +565,13 @@ h2 {
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
 }
 
-.copy-button {
+.message-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.message-tool {
   width: max-content;
   min-width: 0;
   height: 28px;
@@ -579,7 +585,7 @@ h2 {
   box-shadow: none;
 }
 
-.copy-button:hover {
+.message-tool:hover {
   background: #f8fafc;
   color: #0f766e;
 }
