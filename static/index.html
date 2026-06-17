@@ -46,6 +46,8 @@
     </section>
 
     <main id="app-shell" class="app-shell is-hidden">
+      <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true"></div>
+
       <aside class="sidebar" aria-label="聊天记录">
         <div class="sidebar-header">
           <div class="brand-block">
@@ -62,17 +64,29 @@
 
       <section class="chat-panel" aria-label="AI chat">
         <header class="chat-header">
-          <div>
-            <p class="eyebrow">FastAPI + DeepSeek</p>
-            <h1>AI 聊天助手</h1>
+          <div class="chat-title-row">
+            <button id="history-toggle-button" class="icon-button history-toggle" type="button" aria-label="打开聊天记录">
+              ☰
+            </button>
+            <div>
+              <p class="eyebrow">FastAPI + DeepSeek</p>
+              <h1>AI 聊天助手</h1>
+            </div>
           </div>
           <div class="header-actions">
             <span id="user-pill" class="user-pill"></span>
             <span id="usage-pill" class="usage-pill"></span>
             <span id="status" class="status">本地运行中</span>
-            <button id="admin-button" class="secondary-button is-hidden" type="button">后台</button>
-            <button id="clear-chat-button" class="secondary-button" type="button">清空</button>
-            <button id="logout-button" class="secondary-button" type="button">退出</button>
+            <div class="more-menu">
+              <button id="more-button" class="icon-button" type="button" aria-label="更多操作" aria-expanded="false">
+                ⋯
+              </button>
+              <div id="more-menu-panel" class="more-menu-panel is-hidden">
+                <button id="admin-button" class="secondary-button is-hidden" type="button">后台</button>
+                <button id="clear-chat-button" class="secondary-button" type="button">清空</button>
+                <button id="logout-button" class="secondary-button" type="button">退出</button>
+              </div>
+            </div>
           </div>
         </header>
 

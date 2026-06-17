@@ -20,6 +20,10 @@ const logoutButton = document.querySelector("#logout-button");
 const adminButton = document.querySelector("#admin-button");
 const userPill = document.querySelector("#user-pill");
 const usagePill = document.querySelector("#usage-pill");
+const historyToggleButton = document.querySelector("#history-toggle-button");
+const sidebarBackdrop = document.querySelector("#sidebar-backdrop");
+const moreButton = document.querySelector("#more-button");
+const moreMenuPanel = document.querySelector("#more-menu-panel");
 
 const TOKEN_KEY = "ai-chat-token";
 const USER_KEY = "ai-chat-user";
@@ -82,6 +86,23 @@ function showApp() {
   adminButton.classList.toggle("is-hidden", !currentUser?.is_admin);
   renderUsage();
   input.focus();
+}
+
+function setSidebarOpen(isOpen) {
+  appShell.classList.toggle("sidebar-open", isOpen);
+}
+
+function closeSidebar() {
+  setSidebarOpen(false);
+}
+
+function toggleMoreMenu(isOpen = moreMenuPanel.classList.contains("is-hidden")) {
+  moreMenuPanel.classList.toggle("is-hidden", !isOpen);
+  moreButton.setAttribute("aria-expanded", String(isOpen));
+}
+
+function closeMoreMenu() {
+  toggleMoreMenu(false);
 }
 
 function setStatus(text, isError = false) {
@@ -153,11 +174,24 @@ function addMessage(role, content) {
   const item = document.createElement("article");
   item.className = `message ${role}`;
 
+  const contentWrap = document.createElement("div");
+  contentWrap.className = "message-content";
+
   const bubble = document.createElement("div");
   bubble.className = "bubble";
   bubble.textContent = content;
 
-  item.appendChild(bubble);
+  contentWrap.appendChild(bubble);
+  if (role === "assistant" && content) {
+    const copyButton = document.createElement("button");
+    copyButton.type = "button";
+    copyButton.className = "copy-button";
+    copyButton.dataset.copy = content;
+    copyButton.textContent = "复制";
+    contentWrap.appendChild(copyButton);
+  }
+
+  item.appendChild(contentWrap);
   messagesEl.appendChild(item);
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
@@ -166,11 +200,13 @@ function addTypingMessage() {
   const item = document.createElement("article");
   item.className = "message assistant typing";
   item.innerHTML = `
-    <div class="bubble">
-      AI 正在思考
-      <span class="typing-dots" aria-hidden="true">
-        <span></span><span></span><span></span>
-      </span>
+    <div class="message-content">
+      <div class="bubble">
+        AI 正在思考
+        <span class="typing-dots" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </span>
+      </div>
     </div>
   `;
   messagesEl.appendChild(item);
@@ -343,7 +379,22 @@ sessionListEl.addEventListener("click", (event) => {
 
   activeSessionId = Number(item.dataset.sessionId);
   render();
+  closeSidebar();
   input.focus();
+});
+
+messagesEl.addEventListener("click", async (event) => {
+  const button = event.target.closest("button[data-copy]");
+  if (!button) return;
+  try {
+    await navigator.clipboard.writeText(button.dataset.copy || "");
+    button.textContent = "已复制";
+    setTimeout(() => {
+      button.textContent = "复制";
+    }, 1200);
+  } catch {
+    setStatus("复制失败，请手动选择文本", true);
+  }
 });
 
 async function renameSession(sessionId) {
@@ -394,6 +445,7 @@ newChatButton.addEventListener("click", async () => {
     const session = await api("/api/sessions", { method: "POST", body: "{}" });
     upsertSession(session);
     render();
+    closeSidebar();
     setStatus("本地运行中");
     input.focus();
   } catch (error) {
@@ -403,6 +455,7 @@ newChatButton.addEventListener("click", async () => {
 
 clearChatButton.addEventListener("click", async () => {
   if (!activeSessionId) return;
+  closeMoreMenu();
   try {
     const session = await api(`/api/sessions/${activeSessionId}/clear`, { method: "POST", body: "{}" });
     upsertSession(session);
@@ -418,11 +471,38 @@ logoutButton.addEventListener("click", () => {
   clearAuth();
   usageStatus = null;
   render();
+  closeSidebar();
+  closeMoreMenu();
   showAuth("已退出登录。");
 });
 
 adminButton.addEventListener("click", () => {
   window.location.href = "/admin";
+});
+
+historyToggleButton.addEventListener("click", () => {
+  setSidebarOpen(true);
+  closeMoreMenu();
+});
+
+sidebarBackdrop.addEventListener("click", closeSidebar);
+
+moreButton.addEventListener("click", (event) => {
+  event.stopPropagation();
+  toggleMoreMenu();
+});
+
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".more-menu")) {
+    closeMoreMenu();
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeSidebar();
+    closeMoreMenu();
+  }
 });
 
 loginTab.addEventListener("click", () => setAuthMode("login"));
