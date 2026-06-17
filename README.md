@@ -48,9 +48,12 @@ DEEPSEEK_MODEL=deepseek-chat
 SECRET_KEY=replace_with_a_long_random_secret
 DAILY_MESSAGE_LIMIT=50
 ADMIN_USERS=sty2502325085,admin
+DATABASE_URL=
 ```
 
-SQLite data is stored in `chat.db`. The database file is ignored by Git.
+Local SQLite data is stored in `chat.db`. The database file is ignored by Git.
+
+If `DATABASE_URL` is set, the app uses PostgreSQL instead of SQLite. This is recommended for online deployment.
 
 The user `甘水清` is configured as an unlimited account in the local learning version.
 
@@ -77,8 +80,11 @@ DEEPSEEK_MODEL=deepseek-chat
 SECRET_KEY=replace_with_a_long_random_secret
 DAILY_MESSAGE_LIMIT=50
 ADMIN_USERS=sty2502325085,admin
+DATABASE_URL=your_render_postgres_external_database_url
 ```
 
 Do not commit `.env` or `chat.db` to GitHub.
 
-The current deployment version still uses SQLite. It is enough for a small online test, but a later production version should move chat data to PostgreSQL so data survives redeploys reliably.
+For online use, create a Render PostgreSQL database and copy its External Database URL into the Web Service environment variable named `DATABASE_URL`.
+
+The local SQLite database and the online PostgreSQL database are separate. Existing local users and chat records are not automatically copied online.

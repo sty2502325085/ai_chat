@@ -17,3 +17,5 @@ services:
         value: 50
       - key: ADMIN_USERS
         value: sty2502325085,admin
+      - key: DATABASE_URL
+        sync: false

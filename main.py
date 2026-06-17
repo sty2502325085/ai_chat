@@ -7,9 +7,11 @@ import secrets
 import sqlite3
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
+import psycopg
+from psycopg.rows import dict_row
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
@@ -22,6 +24,8 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 DB_PATH = BASE_DIR / "chat.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+USE_POSTGRES = bool(DATABASE_URL)
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
@@ -135,53 +139,116 @@ class AdminUserDetail(BaseModel):
     sessions: list[ChatSession]
 
 
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def normalize_database_url(url: str) -> str:
+    if url.startswith("postgres://"):
+        return "postgresql://" + url.removeprefix("postgres://")
+    return url
+
+
+class DatabaseConnection:
+    def __init__(self) -> None:
+        self.conn: Any | None = None
+
+    def __enter__(self) -> "DatabaseConnection":
+        if USE_POSTGRES:
+            self.conn = psycopg.connect(normalize_database_url(DATABASE_URL), row_factory=dict_row)
+        else:
+            self.conn = sqlite3.connect(DB_PATH)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA foreign_keys = ON")
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        if self.conn is None:
+            return
+        try:
+            if exc_type is None:
+                self.conn.commit()
+            else:
+                self.conn.rollback()
+        finally:
+            self.conn.close()
+
+    def execute(self, query: str, params: tuple[Any, ...] = ()) -> Any:
+        if self.conn is None:
+            raise RuntimeError("Database connection is not open.")
+        if USE_POSTGRES:
+            query = query.replace("?", "%s")
+        return self.conn.execute(query, params)
+
+
+def get_db() -> DatabaseConnection:
+    return DatabaseConnection()
+
+
+def insert_and_get_id(conn: DatabaseConnection, query: str, params: tuple[Any, ...]) -> int:
+    if USE_POSTGRES:
+        row = conn.execute(f"{query} RETURNING id", params).fetchone()
+        return int(row["id"])
+    cursor = conn.execute(query, params)
+    return int(cursor.lastrowid)
 
 
 def init_database() -> None:
     with get_db() as conn:
-        conn.executescript(
-            """
+        id_type = "SERIAL PRIMARY KEY" if USE_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        conn.execute(
+            f"""
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {id_type},
                 username TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 is_disabled INTEGER NOT NULL DEFAULT 0,
                 daily_limit_override INTEGER
-            );
-
+            )
+            """
+        )
+        conn.execute(
+            f"""
             CREATE TABLE IF NOT EXISTS chat_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {id_type},
                 user_id INTEGER NOT NULL,
                 title TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id)
-            );
-
+            )
+            """
+        )
+        conn.execute(
+            f"""
             CREATE TABLE IF NOT EXISTS chat_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id {id_type},
                 session_id INTEGER NOT NULL,
                 role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
                 content TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES chat_sessions(id)
-            );
-
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS usage_limits (
                 user_id INTEGER NOT NULL,
                 date TEXT NOT NULL,
                 used INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (user_id, date),
                 FOREIGN KEY (user_id) REFERENCES users(id)
-            );
+            )
             """
         )
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if USE_POSTGRES:
+            columns = {
+                row["column_name"]
+                for row in conn.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+                    ("users",),
+                ).fetchall()
+            }
+        else:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "is_disabled" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN is_disabled INTEGER NOT NULL DEFAULT 0")
         if "daily_limit_override" not in columns:
@@ -276,7 +343,7 @@ def today_key() -> str:
     return time.strftime("%Y-%m-%d", time.localtime())
 
 
-def get_usage_status(conn: sqlite3.Connection, user_id: int, username: str) -> UsageStatus:
+def get_usage_status(conn: DatabaseConnection, user_id: int, username: str) -> UsageStatus:
     date = today_key()
     row = conn.execute(
         "SELECT used FROM usage_limits WHERE user_id = ? AND date = ?",
@@ -291,14 +358,14 @@ def get_usage_status(conn: sqlite3.Connection, user_id: int, username: str) -> U
     return UsageStatus(date=date, used=used, limit=limit, remaining=remaining, unlimited=unlimited)
 
 
-def ensure_usage_available(conn: sqlite3.Connection, user: sqlite3.Row) -> UsageStatus:
+def ensure_usage_available(conn: DatabaseConnection, user: sqlite3.Row) -> UsageStatus:
     usage = get_usage_status(conn, user["id"], user["username"])
     if not usage.unlimited and usage.remaining is not None and usage.remaining <= 0:
         raise HTTPException(status_code=429, detail="今日 AI 对话次数已用完，请明天再试。")
     return usage
 
 
-def increment_usage(conn: sqlite3.Connection, user: sqlite3.Row) -> UsageStatus:
+def increment_usage(conn: DatabaseConnection, user: sqlite3.Row) -> UsageStatus:
     if user["username"] in UNLIMITED_USERS:
         return get_usage_status(conn, user["id"], user["username"])
     date = today_key()
@@ -354,7 +421,7 @@ def row_to_message(row: sqlite3.Row) -> ChatMessage:
     return ChatMessage(id=row["id"], role=row["role"], content=row["content"], created_at=row["created_at"])
 
 
-def load_session(conn: sqlite3.Connection, session_id: int, user_id: int) -> ChatSession:
+def load_session(conn: DatabaseConnection, session_id: int, user_id: int) -> ChatSession:
     session = conn.execute(
         "SELECT id, title, created_at, updated_at FROM chat_sessions WHERE id = ? AND user_id = ?",
         (session_id, user_id),
@@ -439,7 +506,7 @@ async def register(request: UserCreate) -> MessageResponse:
                 "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
                 (request.username, hash_password(request.password), now),
             )
-    except sqlite3.IntegrityError:
+    except (sqlite3.IntegrityError, psycopg.IntegrityError):
         raise HTTPException(status_code=409, detail="用户名已被注册。")
     return MessageResponse(message="注册成功，请使用新账号登录。")
 
@@ -540,7 +607,7 @@ async def admin_stats(user: sqlite3.Row = Depends(get_admin_user)) -> AdminStats
     )
 
 
-def get_admin_user_row(conn: sqlite3.Connection, user_id: int) -> AdminUserRow:
+def get_admin_user_row(conn: DatabaseConnection, user_id: int) -> AdminUserRow:
     date = today_key()
     row = conn.execute(
         """
@@ -653,11 +720,12 @@ async def list_sessions(user: sqlite3.Row = Depends(get_current_user)) -> list[C
 async def create_session(user: sqlite3.Row = Depends(get_current_user)) -> ChatSession:
     now = int(time.time())
     with get_db() as conn:
-        cursor = conn.execute(
+        session_id = insert_and_get_id(
+            conn,
             "INSERT INTO chat_sessions (user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
             (user["id"], "新对话", now, now),
         )
-        return load_session(conn, cursor.lastrowid, user["id"])
+        return load_session(conn, session_id, user["id"])
 
 
 @app.post("/api/sessions/{session_id}/clear", response_model=ChatSession)
@@ -706,11 +774,11 @@ async def chat(request: ChatRequest, user: sqlite3.Row = Depends(get_current_use
     with get_db() as conn:
         ensure_usage_available(conn, user)
         if request.session_id is None:
-            cursor = conn.execute(
+            session_id = insert_and_get_id(
+                conn,
                 "INSERT INTO chat_sessions (user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
                 (user["id"], make_session_title(request.content), now, now),
             )
-            session_id = cursor.lastrowid
             created_session = True
         else:
             session_id = request.session_id
@@ -721,11 +789,11 @@ async def chat(request: ChatRequest, user: sqlite3.Row = Depends(get_current_use
                     (make_session_title(request.content), now, session_id),
                 )
 
-        cursor = conn.execute(
+        user_message_id = insert_and_get_id(
+            conn,
             "INSERT INTO chat_messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
             (session_id, "user", request.content, now),
         )
-        user_message_id = cursor.lastrowid
         conn.execute("UPDATE chat_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
         context_rows = conn.execute(
             """
