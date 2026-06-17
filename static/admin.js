@@ -293,8 +293,8 @@ async function boot() {
     }
     showDashboard();
     await loadDashboard();
-  } catch {
-    showAccess("请先回到聊天页，用管理员账号登录。");
+  } catch (error) {
+    showAccess(error.message || "后台数据加载失败，请稍后重试。");
   }
 }
 

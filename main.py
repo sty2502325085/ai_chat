@@ -563,12 +563,17 @@ async def admin_stats(user: sqlite3.Row = Depends(get_admin_user)) -> AdminStats
                 users.daily_limit_override,
                 COUNT(DISTINCT chat_sessions.id) AS session_count,
                 COUNT(chat_messages.id) AS message_count,
-                COALESCE(usage_limits.used, 0) AS today_used
+                COALESCE(MAX(usage_limits.used), 0) AS today_used
             FROM users
             LEFT JOIN chat_sessions ON chat_sessions.user_id = users.id
             LEFT JOIN chat_messages ON chat_messages.session_id = chat_sessions.id
             LEFT JOIN usage_limits ON usage_limits.user_id = users.id AND usage_limits.date = ?
-            GROUP BY users.id
+            GROUP BY
+                users.id,
+                users.username,
+                users.created_at,
+                users.is_disabled,
+                users.daily_limit_override
             ORDER BY users.created_at DESC, users.id DESC
             """,
             (date,),
@@ -619,13 +624,18 @@ def get_admin_user_row(conn: DatabaseConnection, user_id: int) -> AdminUserRow:
             users.daily_limit_override,
             COUNT(DISTINCT chat_sessions.id) AS session_count,
             COUNT(chat_messages.id) AS message_count,
-            COALESCE(usage_limits.used, 0) AS today_used
+            COALESCE(MAX(usage_limits.used), 0) AS today_used
         FROM users
         LEFT JOIN chat_sessions ON chat_sessions.user_id = users.id
         LEFT JOIN chat_messages ON chat_messages.session_id = chat_sessions.id
         LEFT JOIN usage_limits ON usage_limits.user_id = users.id AND usage_limits.date = ?
         WHERE users.id = ?
-        GROUP BY users.id
+        GROUP BY
+            users.id,
+            users.username,
+            users.created_at,
+            users.is_disabled,
+            users.daily_limit_override
         """,
         (date, user_id),
     ).fetchone()
