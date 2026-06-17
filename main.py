@@ -369,15 +369,26 @@ def increment_usage(conn: DatabaseConnection, user: sqlite3.Row) -> UsageStatus:
     if user["username"] in UNLIMITED_USERS:
         return get_usage_status(conn, user["id"], user["username"])
     date = today_key()
-    conn.execute(
-        """
-        INSERT INTO usage_limits (user_id, date, used)
-        VALUES (?, ?, 1)
-        ON CONFLICT(user_id, date)
-        DO UPDATE SET used = used + 1
-        """,
-        (user["id"], date),
-    )
+    if USE_POSTGRES:
+        conn.execute(
+            """
+            INSERT INTO usage_limits (user_id, date, used)
+            VALUES (?, ?, 1)
+            ON CONFLICT(user_id, date)
+            DO UPDATE SET used = usage_limits.used + 1
+            """,
+            (user["id"], date),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO usage_limits (user_id, date, used)
+            VALUES (?, ?, 1)
+            ON CONFLICT(user_id, date)
+            DO UPDATE SET used = used + 1
+            """,
+            (user["id"], date),
+        )
     return get_usage_status(conn, user["id"], user["username"])
 
 
@@ -893,14 +904,33 @@ async def chat(request: ChatRequest, user: sqlite3.Row = Depends(get_current_use
         )
         raise HTTPException(status_code=502, detail=f"AI 服务调用失败：{type(exc).__name__}") from exc
 
-    with get_db() as conn:
-        now = int(time.time())
-        conn.execute(
-            "INSERT INTO chat_messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-            (session_id, "assistant", reply, now),
+    try:
+        with get_db() as conn:
+            now = int(time.time())
+            increment_usage(conn, user)
+            conn.execute(
+                "INSERT INTO chat_messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+                (session_id, "assistant", reply, now),
+            )
+            conn.execute("UPDATE chat_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
+            session = load_session(conn, session_id, user["id"])
+    except HTTPException:
+        safe_cleanup_failed_chat(
+            created_session=created_session,
+            session_id=session_id,
+            user_id=user["id"],
+            user_message_id=user_message_id,
+            fallback_updated_at=now,
         )
-        conn.execute("UPDATE chat_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
-        increment_usage(conn, user)
-        session = load_session(conn, session_id, user["id"])
+        raise
+    except Exception as exc:
+        safe_cleanup_failed_chat(
+            created_session=created_session,
+            session_id=session_id,
+            user_id=user["id"],
+            user_message_id=user_message_id,
+            fallback_updated_at=now,
+        )
+        raise HTTPException(status_code=502, detail=f"聊天结果保存失败：{type(exc).__name__}") from exc
 
     return ChatResponse(reply=reply, session=session)
