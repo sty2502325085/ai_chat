@@ -463,9 +463,18 @@ async def call_deepseek(messages: list[dict[str, str]], username: str) -> str:
     except httpx.HTTPStatusError as exc:
         detail = "DeepSeek API returned an error."
         try:
-            detail = exc.response.json().get("error", {}).get("message", detail)
+            error_data = exc.response.json()
+            if isinstance(error_data, dict):
+                error = error_data.get("error")
+                if isinstance(error, dict):
+                    detail = error.get("message") or detail
+                elif isinstance(error, str):
+                    detail = error
+                elif isinstance(error_data.get("message"), str):
+                    detail = error_data["message"]
         except ValueError:
-            pass
+            if exc.response.text:
+                detail = exc.response.text[:300]
         if "insufficient balance" in detail.lower():
             detail = "DeepSeek 账户余额不足，请充值或更换可用 API Key 后再试。"
         raise HTTPException(status_code=502, detail=detail) from exc
@@ -477,6 +486,30 @@ async def call_deepseek(messages: list[dict[str, str]], username: str) -> str:
     if not reply:
         raise HTTPException(status_code=502, detail="DeepSeek API returned an empty reply.")
     return reply
+
+
+def cleanup_failed_chat(
+    *,
+    created_session: bool,
+    session_id: int,
+    user_id: int,
+    user_message_id: int | None,
+    fallback_updated_at: int,
+) -> None:
+    with get_db() as conn:
+        if created_session:
+            conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM chat_sessions WHERE id = ? AND user_id = ?", (session_id, user_id))
+        elif user_message_id is not None:
+            conn.execute("DELETE FROM chat_messages WHERE id = ? AND session_id = ?", (user_message_id, session_id))
+            latest = conn.execute(
+                "SELECT COALESCE(MAX(created_at), ?) AS updated_at FROM chat_messages WHERE session_id = ?",
+                (fallback_updated_at, session_id),
+            ).fetchone()
+            conn.execute(
+                "UPDATE chat_sessions SET updated_at = ? WHERE id = ?",
+                (latest["updated_at"], session_id),
+            )
 
 
 init_database()
@@ -819,21 +852,23 @@ async def chat(request: ChatRequest, user: sqlite3.Row = Depends(get_current_use
     try:
         reply = await call_deepseek(context, user["username"])
     except HTTPException:
-        with get_db() as conn:
-            if created_session:
-                conn.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
-                conn.execute("DELETE FROM chat_sessions WHERE id = ? AND user_id = ?", (session_id, user["id"]))
-            elif user_message_id is not None:
-                conn.execute("DELETE FROM chat_messages WHERE id = ? AND session_id = ?", (user_message_id, session_id))
-                latest = conn.execute(
-                    "SELECT COALESCE(MAX(created_at), ?) AS updated_at FROM chat_messages WHERE session_id = ?",
-                    (now, session_id),
-                ).fetchone()
-                conn.execute(
-                    "UPDATE chat_sessions SET updated_at = ? WHERE id = ?",
-                    (latest["updated_at"], session_id),
-                )
+        cleanup_failed_chat(
+            created_session=created_session,
+            session_id=session_id,
+            user_id=user["id"],
+            user_message_id=user_message_id,
+            fallback_updated_at=now,
+        )
         raise
+    except Exception as exc:
+        cleanup_failed_chat(
+            created_session=created_session,
+            session_id=session_id,
+            user_id=user["id"],
+            user_message_id=user_message_id,
+            fallback_updated_at=now,
+        )
+        raise HTTPException(status_code=502, detail=f"AI 服务调用失败：{type(exc).__name__}") from exc
 
     with get_db() as conn:
         now = int(time.time())
