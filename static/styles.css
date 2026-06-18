@@ -62,7 +62,7 @@ button {
   min-height: 620px;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
+  justify-content: flex-start;
   overflow: hidden;
   padding: 34px;
   background:
@@ -91,8 +91,8 @@ button {
 .auth-hero-copy {
   position: relative;
   z-index: 2;
-  width: min(470px, 100%);
-  margin-bottom: 28px;
+  width: min(340px, 56%);
+  margin-top: 36px;
 }
 
 .auth-hero-copy h2 {
@@ -112,10 +112,10 @@ button {
 
 .auth-cat {
   position: absolute;
-  right: -18px;
-  bottom: 16px;
+  right: -72px;
+  bottom: -4px;
   z-index: 1;
-  width: min(420px, 62%);
+  width: min(380px, 56%);
   opacity: 0.96;
   filter: drop-shadow(0 26px 34px rgba(15, 23, 42, 0.22));
 }
@@ -980,6 +980,7 @@ button:disabled {
 
   .auth-hero-copy {
     width: min(420px, 78%);
+    margin-top: 28px;
     margin-bottom: 0;
   }
 
@@ -1027,6 +1028,7 @@ button:disabled {
 
   .auth-hero-copy {
     width: 72%;
+    margin-top: 18px;
   }
 
   .auth-hero-copy h2 {
