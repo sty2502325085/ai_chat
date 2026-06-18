@@ -27,6 +27,8 @@ const moreMenuPanel = document.querySelector("#more-menu-panel");
 
 const TOKEN_KEY = "ai-chat-token";
 const USER_KEY = "ai-chat-user";
+const TYPEWRITER_DELAY_MS = 14;
+const TYPEWRITER_BATCH_SIZE = 2;
 const WELCOME_MESSAGE = {
   role: "assistant",
   content: "你好，我在这里。登录后你的聊天记录会保存到数据库里，换浏览器也不会混到别人那里。",
@@ -110,6 +112,10 @@ function setStatus(text, isError = false) {
   statusEl.classList.toggle("error", isError);
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function renderUsage() {
   if (!usagePill) return;
   if (!usageStatus) {
@@ -188,10 +194,10 @@ async function streamApi(path, body, handlers = {}) {
       if (!dataLine) continue;
       const event = JSON.parse(dataLine.slice(5).trim());
       if (event.type === "delta") {
-        handlers.onDelta?.(event.content || "");
+        await handlers.onDelta?.(event.content || "");
       } else if (event.type === "done") {
         donePayload = event;
-        handlers.onDone?.(event);
+        await handlers.onDone?.(event);
       } else if (event.type === "error") {
         throw new Error(event.detail || "请求失败，请稍后重试。");
       }
@@ -281,6 +287,20 @@ function addStreamingAssistantMessage() {
   bubble.classList.add("is-streaming");
   bubble.textContent = "正在连接 AI...";
   return { item, bubble };
+}
+
+async function typeIntoBubble(bubble, text, currentText) {
+  let nextText = currentText;
+  if (!nextText) {
+    bubble.textContent = "";
+  }
+  for (let index = 0; index < text.length; index += TYPEWRITER_BATCH_SIZE) {
+    nextText += text.slice(index, index + TYPEWRITER_BATCH_SIZE);
+    bubble.textContent = nextText;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    await sleep(TYPEWRITER_DELAY_MS);
+  }
+  return nextText;
 }
 
 function addTypingMessage() {
@@ -380,10 +400,8 @@ async function sendMessage(content) {
 
   try {
     const data = await streamApi("/api/chat/stream", { content, session_id: activeSessionId }, {
-      onDelta(delta) {
-        reply += delta;
-        streamingMessage.bubble.textContent = reply;
-        messagesEl.scrollTop = messagesEl.scrollHeight;
+      async onDelta(delta) {
+        reply = await typeIntoBubble(streamingMessage.bubble, delta, reply);
       },
     });
     upsertSession(data.session);
