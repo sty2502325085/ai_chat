@@ -14,7 +14,7 @@ import psycopg
 from psycopg.rows import dict_row
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -540,6 +540,51 @@ async def call_deepseek(messages: list[dict[str, str]], username: str) -> str:
     return reply
 
 
+async def stream_deepseek(messages: list[dict[str, str]], username: str):
+    if not DEEPSEEK_API_KEY:
+        raise HTTPException(status_code=500, detail="DEEPSEEK_API_KEY is not configured.")
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": get_system_prompt(username)},
+            *messages[-MAX_CONTEXT_MESSAGES:],
+        ],
+        "temperature": 0.7,
+        "stream": True,
+    }
+    headers = {"Authorization": f"Bearer {DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            async with client.stream("POST", DEEPSEEK_API_URL, headers=headers, json=payload) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line.removeprefix("data:").strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        payload_chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = payload_chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                    if delta:
+                        yield delta
+    except httpx.HTTPStatusError as exc:
+        detail = "DeepSeek API returned an error."
+        if exc.response.status_code == 402:
+            detail = "DeepSeek 账户余额不足，请充值或更换可用 API Key 后再试。"
+        raise HTTPException(status_code=502, detail=detail) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Could not connect to DeepSeek API.") from exc
+
+
+def stream_event(event_type: str, **payload: Any) -> str:
+    return json.dumps({"type": event_type, **payload}, ensure_ascii=False) + "\n"
+
+
 def cleanup_failed_chat(
     *,
     created_session: bool,
@@ -970,6 +1015,80 @@ async def chat(request: ChatRequest, user: sqlite3.Row = Depends(get_current_use
         raise HTTPException(status_code=502, detail=f"聊天结果保存失败：{type(exc).__name__}") from exc
 
     return ChatResponse(reply=reply, session=session)
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(request: ChatRequest, user: sqlite3.Row = Depends(get_current_user)) -> StreamingResponse:
+    now = int(time.time())
+    created_session = False
+    session_id: int | None = None
+    user_message_id: int | None = None
+
+    try:
+        with get_db() as conn:
+            ensure_usage_available(conn, user)
+            if request.session_id is None:
+                session_id = insert_and_get_id(
+                    conn,
+                    "INSERT INTO chat_sessions (user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                    (user["id"], make_session_title(request.content), now, now),
+                )
+                created_session = True
+            else:
+                session_id = request.session_id
+                session = load_session(conn, session_id, user["id"])
+                if session.title == "新对话" and not session.messages:
+                    conn.execute(
+                        "UPDATE chat_sessions SET title = ?, updated_at = ? WHERE id = ?",
+                        (make_session_title(request.content), now, session_id),
+                    )
+
+            user_message_id = insert_and_get_id(
+                conn,
+                "INSERT INTO chat_messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+                (session_id, "user", request.content, now),
+            )
+            conn.execute("UPDATE chat_sessions SET updated_at = ? WHERE id = ?", (now, session_id))
+            context = load_context(conn, session_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"聊天准备失败：{type(exc).__name__}") from exc
+
+    async def events():
+        reply_parts: list[str] = []
+        try:
+            async for chunk in stream_deepseek(context, user["username"]):
+                reply_parts.append(chunk)
+                yield stream_event("delta", content=chunk)
+
+            reply = "".join(reply_parts).strip()
+            if not reply:
+                raise HTTPException(status_code=502, detail="DeepSeek API returned an empty reply.")
+
+            with get_db() as conn:
+                session = save_assistant_reply(conn, session_id, user, reply)
+            yield stream_event("done", session=session.model_dump())
+        except HTTPException as exc:
+            safe_cleanup_failed_chat(
+                created_session=created_session,
+                session_id=session_id,
+                user_id=user["id"],
+                user_message_id=user_message_id,
+                fallback_updated_at=now,
+            )
+            yield stream_event("error", detail=exc.detail)
+        except Exception as exc:
+            safe_cleanup_failed_chat(
+                created_session=created_session,
+                session_id=session_id,
+                user_id=user["id"],
+                user_message_id=user_message_id,
+                fallback_updated_at=now,
+            )
+            yield stream_event("error", detail=f"AI 服务调用失败：{type(exc).__name__}")
+
+    return StreamingResponse(events(), media_type="application/x-ndjson")
 
 
 @app.post("/api/chat/regenerate", response_model=ChatResponse)

@@ -146,6 +146,63 @@ async function api(path, options = {}) {
   return data;
 }
 
+async function streamApi(path, body, handlers = {}) {
+  const headers = { "Content-Type": "application/json" };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  const response = await fetch(path, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 401) {
+      clearAuth();
+      showAuth("登录已失效，请重新登录。");
+    }
+    throw new Error(data.detail || "请求失败，请稍后重试。");
+  }
+
+  if (!response.body) {
+    throw new Error("当前浏览器不支持流式回复。");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let donePayload = null;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const event = JSON.parse(line);
+      if (event.type === "delta") {
+        handlers.onDelta?.(event.content || "");
+      } else if (event.type === "done") {
+        donePayload = event;
+        handlers.onDone?.(event);
+      } else if (event.type === "error") {
+        throw new Error(event.detail || "请求失败，请稍后重试。");
+      }
+    }
+  }
+
+  if (!donePayload) {
+    throw new Error("AI 回复中断，请稍后重试。");
+  }
+  return donePayload;
+}
+
 function formatSessionTime(timestamp) {
   return new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit",
@@ -214,6 +271,15 @@ function addMessage(role, content, options = {}) {
   item.appendChild(contentWrap);
   messagesEl.appendChild(item);
   messagesEl.scrollTop = messagesEl.scrollHeight;
+  return item;
+}
+
+function addStreamingAssistantMessage() {
+  const item = addMessage("assistant", "");
+  const bubble = item.querySelector(".bubble");
+  bubble.classList.add("is-streaming");
+  bubble.textContent = "正在连接 AI...";
+  return { item, bubble };
 }
 
 function addTypingMessage() {
@@ -306,22 +372,25 @@ async function loadUsage() {
 async function sendMessage(content) {
   sendButton.disabled = true;
   input.disabled = true;
-  setStatus("AI 思考中...");
+  setStatus("AI 正在回复...");
   addMessage("user", content);
-  const typingMessage = addTypingMessage();
+  const streamingMessage = addStreamingAssistantMessage();
+  let reply = "";
 
   try {
-    const data = await api("/api/chat", {
-      method: "POST",
-      body: JSON.stringify({ content, session_id: activeSessionId }),
+    const data = await streamApi("/api/chat/stream", { content, session_id: activeSessionId }, {
+      onDelta(delta) {
+        reply += delta;
+        streamingMessage.bubble.textContent = reply;
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      },
     });
-    typingMessage.remove();
     upsertSession(data.session);
     await loadUsage();
     render();
     setStatus("本地运行中");
   } catch (error) {
-    typingMessage.remove();
+    streamingMessage.item.remove();
     addMessage("assistant", `出错了：${error.message}`);
     setStatus("请求失败", true);
   } finally {
