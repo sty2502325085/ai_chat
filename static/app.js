@@ -180,12 +180,13 @@ async function streamApi(path, body, handlers = {}) {
     const { value, done } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
+    const events = buffer.split("\n\n");
+    buffer = events.pop() || "";
 
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      const event = JSON.parse(line);
+    for (const block of events) {
+      const dataLine = block.split("\n").find((line) => line.startsWith("data:"));
+      if (!dataLine) continue;
+      const event = JSON.parse(dataLine.slice(5).trim());
       if (event.type === "delta") {
         handlers.onDelta?.(event.content || "");
       } else if (event.type === "done") {

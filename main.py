@@ -582,7 +582,12 @@ async def stream_deepseek(messages: list[dict[str, str]], username: str):
 
 
 def stream_event(event_type: str, **payload: Any) -> str:
-    return json.dumps({"type": event_type, **payload}, ensure_ascii=False) + "\n"
+    data = json.dumps({"type": event_type, **payload}, ensure_ascii=False)
+    return f"event: {event_type}\ndata: {data}\n\n"
+
+
+def stream_padding() -> str:
+    return ":" + (" " * 2048) + "\n\n"
 
 
 def cleanup_failed_chat(
@@ -1057,6 +1062,8 @@ async def chat_stream(request: ChatRequest, user: sqlite3.Row = Depends(get_curr
 
     async def events():
         reply_parts: list[str] = []
+        yield stream_padding()
+        yield stream_event("ready")
         try:
             async for chunk in stream_deepseek(context, user["username"]):
                 reply_parts.append(chunk)
@@ -1088,7 +1095,15 @@ async def chat_stream(request: ChatRequest, user: sqlite3.Row = Depends(get_curr
             )
             yield stream_event("error", detail=f"AI 服务调用失败：{type(exc).__name__}")
 
-    return StreamingResponse(events(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/chat/regenerate", response_model=ChatResponse)
