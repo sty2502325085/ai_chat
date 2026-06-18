@@ -8,40 +8,49 @@
   </head>
   <body>
     <section id="auth-screen" class="auth-screen">
-      <div class="auth-card">
-        <div class="auth-brand">
-          <span class="brand-mark">AI</span>
-          <div>
-            <p class="eyebrow">FastAPI + DeepSeek</p>
-            <h1>AI 聊天助手</h1>
+      <div class="auth-shell">
+        <div class="auth-hero" aria-hidden="true">
+          <div class="auth-hero-brand">
+            <span class="brand-mark">AI</span>
+            <div>
+              <p class="eyebrow">FastAPI + DeepSeek</p>
+              <h1>AI 聊天助手</h1>
+            </div>
           </div>
-        </div>
-
-        <div class="auth-cat-card" aria-label="灰白小猫">
-          <img src="/static/assets/cat-mascot.png" alt="灰白小猫插画角色" />
-          <div>
-            <p class="eyebrow">Cat Mode</p>
-            <strong>带着猫猫一起聊天</strong>
+          <div class="auth-hero-copy">
+            <h2>把想法、问题和日常对话放进一个安静的空间。</h2>
+            <p>登录后自动保存聊天记录，电脑和手机都能继续同一段对话。</p>
           </div>
+          <img class="auth-cat" src="/static/assets/cat-mascot.png" alt="" />
         </div>
 
-        <div class="auth-tabs" role="tablist" aria-label="登录或注册">
-          <button id="login-tab" class="auth-tab active" type="button">登录</button>
-          <button id="register-tab" class="auth-tab" type="button">注册</button>
-        </div>
+        <div class="auth-card">
+          <div class="auth-brand">
+            <span class="brand-mark">AI</span>
+            <div>
+              <p class="eyebrow">FastAPI + DeepSeek</p>
+              <h1>AI 聊天助手</h1>
+            </div>
+          </div>
 
-        <form id="auth-form" class="auth-form">
-          <label>
-            用户名
-            <input id="auth-username" name="username" autocomplete="username" required />
-          </label>
-          <label>
-            密码
-            <input id="auth-password" name="password" type="password" autocomplete="current-password" required />
-          </label>
-          <button id="auth-submit" type="submit">登录</button>
-          <p id="auth-message" class="auth-message"></p>
-        </form>
+          <div class="auth-tabs" role="tablist" aria-label="登录或注册">
+            <button id="login-tab" class="auth-tab active" type="button">登录</button>
+            <button id="register-tab" class="auth-tab" type="button">注册</button>
+          </div>
+
+          <form id="auth-form" class="auth-form">
+            <label>
+              用户名
+              <input id="auth-username" name="username" autocomplete="username" required />
+            </label>
+            <label>
+              密码
+              <input id="auth-password" name="password" type="password" autocomplete="current-password" required />
+            </label>
+            <button id="auth-submit" type="submit">登录</button>
+            <p id="auth-message" class="auth-message"></p>
+          </form>
+        </div>
       </div>
     </section>
 
