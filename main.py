@@ -64,6 +64,7 @@ class UsageStatus(BaseModel):
     limit: int | None
     remaining: int | None
     unlimited: bool
+    recharge_balance: int = 0
 
 
 class AuthResponse(BaseModel):
@@ -122,6 +123,15 @@ class AdminUserRow(BaseModel):
     is_admin: bool
     is_disabled: bool
     limit_override: int | None
+    recharge_balance: int
+
+
+class RechargeRecord(BaseModel):
+    id: int
+    user_id: int
+    amount: int
+    note: str
+    created_at: int
 
 
 class AdminStats(BaseModel):
@@ -138,9 +148,15 @@ class AdminUserUpdate(BaseModel):
     daily_limit_override: int | None = Field(default=None, ge=0, le=10000)
 
 
+class AdminRechargeRequest(BaseModel):
+    amount: int = Field(ge=1, le=10000)
+    note: str = Field(default="", max_length=120)
+
+
 class AdminUserDetail(BaseModel):
     user: AdminUserRow
     sessions: list[ChatSession]
+    recharge_records: list[RechargeRecord]
 
 
 def normalize_database_url(url: str) -> str:
@@ -204,7 +220,8 @@ def init_database() -> None:
                 password_hash TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 is_disabled INTEGER NOT NULL DEFAULT 0,
-                daily_limit_override INTEGER
+                daily_limit_override INTEGER,
+                recharge_balance INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -243,6 +260,18 @@ def init_database() -> None:
             )
             """
         )
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS recharge_records (
+                id {id_type},
+                user_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
         if USE_POSTGRES:
             columns = {
                 row["column_name"]
@@ -257,6 +286,8 @@ def init_database() -> None:
             conn.execute("ALTER TABLE users ADD COLUMN is_disabled INTEGER NOT NULL DEFAULT 0")
         if "daily_limit_override" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN daily_limit_override INTEGER")
+        if "recharge_balance" not in columns:
+            conn.execute("ALTER TABLE users ADD COLUMN recharge_balance INTEGER NOT NULL DEFAULT 0")
 
 
 def hash_password(password: str) -> str:
@@ -327,7 +358,7 @@ def get_current_user(authorization: str | None = Header(default=None)) -> sqlite
     user_id = verify_token(authorization.removeprefix("Bearer ").strip())
     with get_db() as conn:
         user = conn.execute(
-            "SELECT id, username, is_disabled, daily_limit_override FROM users WHERE id = ?",
+            "SELECT id, username, is_disabled, daily_limit_override, recharge_balance FROM users WHERE id = ?",
             (user_id,),
         ).fetchone()
     if not user:
@@ -355,17 +386,26 @@ def get_usage_status(conn: DatabaseConnection, user_id: int, username: str) -> U
     ).fetchone()
     used = row["used"] if row else 0
     unlimited = username in UNLIMITED_USERS
-    user = conn.execute("SELECT daily_limit_override FROM users WHERE id = ?", (user_id,)).fetchone()
+    user = conn.execute("SELECT daily_limit_override, recharge_balance FROM users WHERE id = ?", (user_id,)).fetchone()
     effective_limit = user["daily_limit_override"] if user and user["daily_limit_override"] is not None else DAILY_MESSAGE_LIMIT
+    recharge_balance = max(int(user["recharge_balance"] or 0), 0) if user else 0
     limit = None if unlimited else effective_limit
-    remaining = None if unlimited else max(effective_limit - used, 0)
-    return UsageStatus(date=date, used=used, limit=limit, remaining=remaining, unlimited=unlimited)
+    free_remaining = max(effective_limit - used, 0)
+    remaining = None if unlimited else free_remaining + recharge_balance
+    return UsageStatus(
+        date=date,
+        used=used,
+        limit=limit,
+        remaining=remaining,
+        unlimited=unlimited,
+        recharge_balance=recharge_balance,
+    )
 
 
 def ensure_usage_available(conn: DatabaseConnection, user: sqlite3.Row) -> UsageStatus:
     usage = get_usage_status(conn, user["id"], user["username"])
     if not usage.unlimited and usage.remaining is not None and usage.remaining <= 0:
-        raise HTTPException(status_code=429, detail="今日 AI 对话次数已用完，请明天再试。")
+        raise HTTPException(status_code=429, detail="今日免费次数和充值次数都已用完，请充值后再试。")
     return usage
 
 
@@ -373,6 +413,15 @@ def increment_usage(conn: DatabaseConnection, user: sqlite3.Row) -> UsageStatus:
     if user["username"] in UNLIMITED_USERS:
         return get_usage_status(conn, user["id"], user["username"])
     date = today_key()
+    usage = get_usage_status(conn, user["id"], user["username"])
+    if usage.limit is not None and usage.used >= usage.limit:
+        if usage.recharge_balance <= 0:
+            raise HTTPException(status_code=429, detail="今日免费次数和充值次数都已用完，请充值后再试。")
+        conn.execute(
+            "UPDATE users SET recharge_balance = recharge_balance - 1 WHERE id = ? AND recharge_balance > 0",
+            (user["id"],),
+        )
+        return get_usage_status(conn, user["id"], user["username"])
     if USE_POSTGRES:
         conn.execute(
             """
@@ -683,7 +732,7 @@ async def register(request: UserCreate) -> MessageResponse:
 async def login(request: UserLogin) -> AuthResponse:
     with get_db() as conn:
         user = conn.execute(
-            "SELECT id, username, password_hash, is_disabled, daily_limit_override FROM users WHERE username = ?",
+            "SELECT id, username, password_hash, is_disabled, daily_limit_override, recharge_balance FROM users WHERE username = ?",
             (request.username,),
         ).fetchone()
     if not user or not verify_password(request.password, user["password_hash"]):
@@ -729,6 +778,7 @@ async def admin_stats(user: sqlite3.Row = Depends(get_admin_user)) -> AdminStats
                 users.created_at,
                 users.is_disabled,
                 users.daily_limit_override,
+                users.recharge_balance,
                 COUNT(DISTINCT chat_sessions.id) AS session_count,
                 COUNT(chat_messages.id) AS message_count,
                 COALESCE(MAX(usage_limits.used), 0) AS today_used
@@ -741,7 +791,8 @@ async def admin_stats(user: sqlite3.Row = Depends(get_admin_user)) -> AdminStats
                 users.username,
                 users.created_at,
                 users.is_disabled,
-                users.daily_limit_override
+                users.daily_limit_override,
+                users.recharge_balance
             ORDER BY users.created_at DESC, users.id DESC
             """,
             (date,),
@@ -752,7 +803,8 @@ async def admin_stats(user: sqlite3.Row = Depends(get_admin_user)) -> AdminStats
         unlimited = row["username"] in UNLIMITED_USERS
         effective_limit = row["daily_limit_override"] if row["daily_limit_override"] is not None else DAILY_MESSAGE_LIMIT
         daily_limit = None if unlimited else effective_limit
-        remaining = None if unlimited else max(effective_limit - row["today_used"], 0)
+        recharge_balance = max(int(row["recharge_balance"] or 0), 0)
+        remaining = None if unlimited else max(effective_limit - row["today_used"], 0) + recharge_balance
         users.append(
             AdminUserRow(
                 id=row["id"],
@@ -767,6 +819,7 @@ async def admin_stats(user: sqlite3.Row = Depends(get_admin_user)) -> AdminStats
                 is_admin=row["username"] in ADMIN_USERS,
                 is_disabled=bool(row["is_disabled"]),
                 limit_override=row["daily_limit_override"],
+                recharge_balance=recharge_balance,
             )
         )
 
@@ -790,6 +843,7 @@ def get_admin_user_row(conn: DatabaseConnection, user_id: int) -> AdminUserRow:
             users.created_at,
             users.is_disabled,
             users.daily_limit_override,
+            users.recharge_balance,
             COUNT(DISTINCT chat_sessions.id) AS session_count,
             COUNT(chat_messages.id) AS message_count,
             COALESCE(MAX(usage_limits.used), 0) AS today_used
@@ -803,7 +857,8 @@ def get_admin_user_row(conn: DatabaseConnection, user_id: int) -> AdminUserRow:
             users.username,
             users.created_at,
             users.is_disabled,
-            users.daily_limit_override
+            users.daily_limit_override,
+            users.recharge_balance
         """,
         (date, user_id),
     ).fetchone()
@@ -812,7 +867,8 @@ def get_admin_user_row(conn: DatabaseConnection, user_id: int) -> AdminUserRow:
     unlimited = row["username"] in UNLIMITED_USERS
     effective_limit = row["daily_limit_override"] if row["daily_limit_override"] is not None else DAILY_MESSAGE_LIMIT
     daily_limit = None if unlimited else effective_limit
-    remaining = None if unlimited else max(effective_limit - row["today_used"], 0)
+    recharge_balance = max(int(row["recharge_balance"] or 0), 0)
+    remaining = None if unlimited else max(effective_limit - row["today_used"], 0) + recharge_balance
     return AdminUserRow(
         id=row["id"],
         username=row["username"],
@@ -826,6 +882,7 @@ def get_admin_user_row(conn: DatabaseConnection, user_id: int) -> AdminUserRow:
         is_admin=row["username"] in ADMIN_USERS,
         is_disabled=bool(row["is_disabled"]),
         limit_override=row["daily_limit_override"],
+        recharge_balance=recharge_balance,
     )
 
 
@@ -864,6 +921,29 @@ async def admin_clear_user_limit(
         return get_admin_user_row(conn, user_id)
 
 
+@app.post("/api/admin/users/{user_id}/recharge", response_model=AdminUserRow)
+async def admin_recharge_user(
+    user_id: int,
+    request: AdminRechargeRequest,
+    admin: sqlite3.Row = Depends(get_admin_user),
+) -> AdminUserRow:
+    now = int(time.time())
+    note = " ".join(request.note.split())[:120]
+    with get_db() as conn:
+        target = conn.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="用户不存在。")
+        conn.execute(
+            "UPDATE users SET recharge_balance = recharge_balance + ? WHERE id = ?",
+            (request.amount, user_id),
+        )
+        conn.execute(
+            "INSERT INTO recharge_records (user_id, amount, note, created_at) VALUES (?, ?, ?, ?)",
+            (user_id, request.amount, note or "管理员手动充值", now),
+        )
+        return get_admin_user_row(conn, user_id)
+
+
 @app.get("/api/admin/users/{user_id}", response_model=AdminUserDetail)
 async def admin_user_detail(
     user_id: int,
@@ -881,7 +961,26 @@ async def admin_user_detail(
             (user_id,),
         ).fetchall()
         sessions = [load_session(conn, row["id"], user_id) for row in rows]
-    return AdminUserDetail(user=user, sessions=sessions)
+        record_rows = conn.execute(
+            """
+            SELECT id, user_id, amount, note, created_at FROM recharge_records
+            WHERE user_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 10
+            """,
+            (user_id,),
+        ).fetchall()
+        recharge_records = [
+            RechargeRecord(
+                id=row["id"],
+                user_id=row["user_id"],
+                amount=row["amount"],
+                note=row["note"],
+                created_at=row["created_at"],
+            )
+            for row in record_rows
+        ]
+    return AdminUserDetail(user=user, sessions=sessions, recharge_records=recharge_records)
 
 
 @app.get("/api/sessions", response_model=list[ChatSession])

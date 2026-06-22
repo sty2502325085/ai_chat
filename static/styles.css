@@ -815,6 +815,54 @@ button:disabled {
   transform: none;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.36);
+}
+
+.modal-card {
+  width: min(390px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 24px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.24);
+}
+
+.modal-card h2,
+.modal-card p {
+  margin: 0;
+}
+
+.modal-card h2 {
+  font-size: 21px;
+}
+
+.modal-card p {
+  color: #475569;
+  line-height: 1.7;
+}
+
+.recharge-note {
+  padding: 12px;
+  border-radius: 8px;
+  background: #f0fdfa;
+  color: #0f766e;
+  font-weight: 700;
+}
+
+.modal-card button {
+  width: 100%;
+  background: #0f766e;
+}
+
 .messages::-webkit-scrollbar,
 .session-list::-webkit-scrollbar {
   width: 10px;

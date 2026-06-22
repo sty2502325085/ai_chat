@@ -18,12 +18,16 @@ const newChatButton = document.querySelector("#new-chat-button");
 const clearChatButton = document.querySelector("#clear-chat-button");
 const logoutButton = document.querySelector("#logout-button");
 const adminButton = document.querySelector("#admin-button");
+const rechargeButton = document.querySelector("#recharge-button");
 const userPill = document.querySelector("#user-pill");
 const usagePill = document.querySelector("#usage-pill");
 const historyToggleButton = document.querySelector("#history-toggle-button");
 const sidebarBackdrop = document.querySelector("#sidebar-backdrop");
 const moreButton = document.querySelector("#more-button");
 const moreMenuPanel = document.querySelector("#more-menu-panel");
+const rechargeModal = document.querySelector("#recharge-modal");
+const rechargeSummary = document.querySelector("#recharge-summary");
+const rechargeCloseButton = document.querySelector("#recharge-close-button");
 
 const TOKEN_KEY = "ai-chat-token";
 const USER_KEY = "ai-chat-user";
@@ -107,6 +111,18 @@ function closeMoreMenu() {
   toggleMoreMenu(false);
 }
 
+function openRechargeModal() {
+  const balance = usageStatus?.recharge_balance || 0;
+  const remaining = usageStatus?.unlimited ? "不限次数" : `${usageStatus?.remaining ?? 0} 次`;
+  rechargeSummary.textContent = `当前可用：${remaining}，其中充值余额 ${balance} 次。`;
+  rechargeModal.classList.remove("is-hidden");
+  closeMoreMenu();
+}
+
+function closeRechargeModal() {
+  rechargeModal.classList.add("is-hidden");
+}
+
 function setStatus(text, isError = false) {
   statusEl.textContent = text;
   statusEl.classList.toggle("error", isError);
@@ -128,7 +144,11 @@ function renderUsage() {
     return;
   }
   usagePill.classList.remove("unlimited");
-  usagePill.textContent = `今日剩余 ${usageStatus.remaining}/${usageStatus.limit}`;
+  if (usageStatus.recharge_balance > 0) {
+    usagePill.textContent = `可用 ${usageStatus.remaining} · 充值 ${usageStatus.recharge_balance}`;
+  } else {
+    usagePill.textContent = `今日剩余 ${usageStatus.remaining}/${usageStatus.limit}`;
+  }
 }
 
 async function api(path, options = {}) {
@@ -627,6 +647,16 @@ adminButton.addEventListener("click", () => {
   window.location.href = "/admin";
 });
 
+rechargeButton.addEventListener("click", openRechargeModal);
+
+rechargeCloseButton.addEventListener("click", closeRechargeModal);
+
+rechargeModal.addEventListener("click", (event) => {
+  if (event.target === rechargeModal) {
+    closeRechargeModal();
+  }
+});
+
 historyToggleButton.addEventListener("click", () => {
   setSidebarOpen(true);
   closeMoreMenu();
@@ -649,6 +679,7 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     closeSidebar();
     closeMoreMenu();
+    closeRechargeModal();
   }
 });
 

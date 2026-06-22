@@ -72,6 +72,7 @@
                   <th>消息</th>
                   <th>今日使用</th>
                   <th>剩余次数</th>
+                  <th>充值余额</th>
                   <th>权限</th>
                   <th>操作</th>
                 </tr>
@@ -104,6 +105,25 @@
           <div class="modal-actions">
             <button id="limit-cancel-button" type="button">取消</button>
             <button type="submit">保存</button>
+          </div>
+        </form>
+      </div>
+
+      <div id="recharge-modal" class="modal-backdrop is-hidden">
+        <form id="recharge-form" class="modal-card">
+          <h2>手动充值</h2>
+          <p id="recharge-modal-user"></p>
+          <label>
+            增加次数
+            <input id="recharge-input" type="number" min="1" max="10000" step="1" required />
+          </label>
+          <label>
+            备注
+            <input id="recharge-note-input" type="text" maxlength="120" placeholder="例如：微信转账 10 元" />
+          </label>
+          <div class="modal-actions">
+            <button id="recharge-cancel-button" type="button">取消</button>
+            <button type="submit">确认充值</button>
           </div>
         </form>
       </div>

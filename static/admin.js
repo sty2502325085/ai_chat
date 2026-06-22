@@ -24,10 +24,17 @@ const limitForm = document.querySelector("#limit-form");
 const limitModalUser = document.querySelector("#limit-modal-user");
 const limitInput = document.querySelector("#limit-input");
 const limitCancelButton = document.querySelector("#limit-cancel-button");
+const rechargeModal = document.querySelector("#recharge-modal");
+const rechargeForm = document.querySelector("#recharge-form");
+const rechargeModalUser = document.querySelector("#recharge-modal-user");
+const rechargeInput = document.querySelector("#recharge-input");
+const rechargeNoteInput = document.querySelector("#recharge-note-input");
+const rechargeCancelButton = document.querySelector("#recharge-cancel-button");
 
 let token = localStorage.getItem(TOKEN_KEY);
 let currentUser = null;
 let editingLimitUserId = null;
+let rechargingUserId = null;
 
 function showAccess(message = "请先在聊天页登录管理员账号。") {
   accessPanel.classList.remove("is-hidden");
@@ -108,12 +115,14 @@ function renderStats(stats) {
       <td>${user.message_count}</td>
       <td>${user.today_used}</td>
       <td>${remaining}</td>
+      <td>${user.unlimited ? "不限" : user.recharge_balance}</td>
       <td>${badges || '<span class="badge">普通用户</span>'}</td>
       <td>
         <div class="row-actions">
           <button type="button" data-action="toggle" data-user-id="${user.id}">
             ${user.is_disabled ? "启用" : "禁用"}
           </button>
+          <button type="button" data-action="recharge" data-user-id="${user.id}">充值</button>
           <button type="button" data-action="limit" data-user-id="${user.id}">额度</button>
           <button type="button" data-action="clear-limit" data-user-id="${user.id}">默认</button>
           <button type="button" data-action="detail" data-user-id="${user.id}">记录</button>
@@ -152,6 +161,30 @@ async function showUserDetail(userId) {
 
   if (!detail.sessions.length) {
     detailContent.innerHTML = '<p class="empty-state">暂无聊天记录。</p>';
+  }
+
+  if (detail.recharge_records.length) {
+    const rechargeBlock = document.createElement("article");
+    rechargeBlock.className = "session-detail";
+    const heading = document.createElement("h3");
+    heading.textContent = "最近充值记录";
+    rechargeBlock.appendChild(heading);
+
+    detail.recharge_records.forEach((record) => {
+      const item = document.createElement("div");
+      item.className = "detail-message assistant";
+
+      const amount = document.createElement("strong");
+      amount.textContent = `+${record.amount} 次`;
+
+      const content = document.createElement("span");
+      content.textContent = `${formatTime(record.created_at)} · ${record.note || "管理员手动充值"}`;
+
+      item.append(amount, content);
+      rechargeBlock.appendChild(item);
+    });
+
+    detailContent.appendChild(rechargeBlock);
   }
 
   detail.sessions.forEach((session) => {
@@ -201,6 +234,26 @@ function closeLimitModal() {
   limitInput.value = "";
 }
 
+function openRechargeModal(userId) {
+  const row = [...userTable.querySelectorAll("tr")].find((item) =>
+    item.querySelector(`[data-user-id="${userId}"]`),
+  );
+  const username = row?.querySelector("td")?.textContent || "用户";
+  rechargingUserId = userId;
+  rechargeModalUser.textContent = `正在充值：${username}`;
+  rechargeInput.value = "";
+  rechargeNoteInput.value = "";
+  rechargeModal.classList.remove("is-hidden");
+  rechargeInput.focus();
+}
+
+function closeRechargeModal() {
+  rechargingUserId = null;
+  rechargeModal.classList.add("is-hidden");
+  rechargeInput.value = "";
+  rechargeNoteInput.value = "";
+}
+
 userTable.addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
@@ -217,6 +270,10 @@ userTable.addEventListener("click", async (event) => {
 
     if (action === "limit") {
       openLimitModal(userId);
+    }
+
+    if (action === "recharge") {
+      openRechargeModal(userId);
     }
 
     if (action === "clear-limit") {
@@ -254,6 +311,39 @@ limitCancelButton.addEventListener("click", closeLimitModal);
 limitModal.addEventListener("click", (event) => {
   if (event.target === limitModal) {
     closeLimitModal();
+  }
+});
+
+rechargeForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!rechargingUserId) return;
+  const parsed = Number(rechargeInput.value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    rechargeInput.setCustomValidity("请输入大于 0 的整数。");
+    rechargeInput.reportValidity();
+    return;
+  }
+  rechargeInput.setCustomValidity("");
+  try {
+    await api(`/api/admin/users/${rechargingUserId}/recharge`, {
+      method: "POST",
+      body: JSON.stringify({
+        amount: parsed,
+        note: rechargeNoteInput.value.trim(),
+      }),
+    });
+    closeRechargeModal();
+    await loadDashboard();
+  } catch (error) {
+    window.alert(error.message);
+  }
+});
+
+rechargeCancelButton.addEventListener("click", closeRechargeModal);
+
+rechargeModal.addEventListener("click", (event) => {
+  if (event.target === rechargeModal) {
+    closeRechargeModal();
   }
 });
 

@@ -92,6 +92,7 @@
               </button>
               <div id="more-menu-panel" class="more-menu-panel is-hidden">
                 <button id="admin-button" class="secondary-button is-hidden" type="button">后台</button>
+                <button id="recharge-button" class="secondary-button" type="button">充值</button>
                 <button id="clear-chat-button" class="secondary-button" type="button">清空</button>
                 <button id="logout-button" class="secondary-button" type="button">退出</button>
               </div>
@@ -115,6 +116,15 @@
           <button id="send-button" type="submit">发送</button>
         </form>
       </section>
+
+      <div id="recharge-modal" class="modal-backdrop is-hidden">
+        <div class="modal-card recharge-card" role="dialog" aria-modal="true" aria-labelledby="recharge-title">
+          <h2 id="recharge-title">充值次数</h2>
+          <p id="recharge-summary">当前版本暂不接入在线支付。</p>
+          <p class="recharge-note">请联系管理员充值，管理员确认后会直接给你的账号增加可用次数。</p>
+          <button id="recharge-close-button" type="button">知道了</button>
+        </div>
+      </div>
     </main>
 
     <script src="/static/app.js"></script>
