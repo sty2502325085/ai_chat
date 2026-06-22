@@ -879,15 +879,16 @@ button:disabled {
   gap: 4px 12px;
   padding: 13px 14px;
   border: 1px solid #dbe3ee;
-  background: #ffffff;
+  background: linear-gradient(135deg, #ffffff, #f8fffd);
   color: #172033;
   text-align: left;
-  box-shadow: none;
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.06);
 }
 
 .package-option:hover {
   border-color: #14b8a6;
   background: #f8fffd;
+  box-shadow: 0 16px 30px rgba(15, 118, 110, 0.14);
 }
 
 .package-option span,

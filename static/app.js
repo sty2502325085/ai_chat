@@ -35,6 +35,11 @@ const TOKEN_KEY = "ai-chat-token";
 const USER_KEY = "ai-chat-user";
 const TYPEWRITER_DELAY_MS = 14;
 const TYPEWRITER_BATCH_SIZE = 2;
+const DEFAULT_RECHARGE_PACKAGES = [
+  { id: "starter", name: "体验包", amount_cents: 100, credits: 20 },
+  { id: "standard", name: "标准包", amount_cents: 500, credits: 120 },
+  { id: "pro", name: "进阶包", amount_cents: 1000, credits: 300 },
+];
 const WELCOME_MESSAGE = {
   role: "assistant",
   content: "你好，我在这里。登录后你的聊天记录会保存到数据库里，换浏览器也不会混到别人那里。",
@@ -155,12 +160,13 @@ async function loadRechargePackages() {
     renderRechargePackages();
     return;
   }
-  packageList.innerHTML = '<p class="empty-inline">套餐加载中...</p>';
+  rechargePackages = [...DEFAULT_RECHARGE_PACKAGES];
+  renderRechargePackages();
   try {
     rechargePackages = await api("/api/recharge/packages");
     renderRechargePackages();
   } catch (error) {
-    packageList.innerHTML = `<p class="empty-inline">${error.message}</p>`;
+    rechargeOrderStatus.textContent = `套餐同步失败，暂时使用本地默认套餐：${error.message}`;
   }
 }
 
