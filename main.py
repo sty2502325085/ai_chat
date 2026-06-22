@@ -36,6 +36,11 @@ MAX_CONTEXT_MESSAGES = 10
 DAILY_MESSAGE_LIMIT = int(os.getenv("DAILY_MESSAGE_LIMIT", "50"))
 UNLIMITED_USERS = {"甘水清"}
 ADMIN_USERS = {name.strip() for name in os.getenv("ADMIN_USERS", "sty2502325085,admin").split(",") if name.strip()}
+RECHARGE_PACKAGES = {
+    "starter": {"name": "体验包", "amount_cents": 100, "credits": 20},
+    "standard": {"name": "标准包", "amount_cents": 500, "credits": 120},
+    "pro": {"name": "进阶包", "amount_cents": 1000, "credits": 300},
+}
 
 app = FastAPI(title="AI Chat Assistant")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -151,6 +156,29 @@ class AdminUserUpdate(BaseModel):
 class AdminRechargeRequest(BaseModel):
     amount: int = Field(ge=1, le=10000)
     note: str = Field(default="", max_length=120)
+
+
+class RechargePackage(BaseModel):
+    id: str
+    name: str
+    amount_cents: int
+    credits: int
+
+
+class RechargeOrderCreate(BaseModel):
+    package_id: str = Field(min_length=1, max_length=30)
+
+
+class RechargeOrder(BaseModel):
+    order_no: str
+    package_id: str
+    package_name: str
+    amount_cents: int
+    credits: int
+    status: str
+    provider: str
+    created_at: int
+    paid_at: int | None = None
 
 
 class AdminUserDetail(BaseModel):
@@ -272,6 +300,25 @@ def init_database() -> None:
             )
             """
         )
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS recharge_orders (
+                id {id_type},
+                order_no TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                package_id TEXT NOT NULL,
+                package_name TEXT NOT NULL,
+                amount_cents INTEGER NOT NULL,
+                credits INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                provider_trade_no TEXT,
+                created_at INTEGER NOT NULL,
+                paid_at INTEGER,
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+            """
+        )
         if USE_POSTGRES:
             columns = {
                 row["column_name"]
@@ -376,6 +423,44 @@ def get_admin_user(user: sqlite3.Row = Depends(get_current_user)) -> sqlite3.Row
 
 def today_key() -> str:
     return time.strftime("%Y-%m-%d", time.localtime())
+
+
+def create_order_no() -> str:
+    return f"RC{int(time.time())}{secrets.token_hex(5).upper()}"
+
+
+def row_to_recharge_order(row: sqlite3.Row) -> RechargeOrder:
+    return RechargeOrder(
+        order_no=row["order_no"],
+        package_id=row["package_id"],
+        package_name=row["package_name"],
+        amount_cents=row["amount_cents"],
+        credits=row["credits"],
+        status=row["status"],
+        provider=row["provider"],
+        created_at=row["created_at"],
+        paid_at=row["paid_at"],
+    )
+
+
+def mark_recharge_order_paid(conn: DatabaseConnection, order: sqlite3.Row, note: str = "") -> RechargeOrder:
+    if order["status"] == "paid":
+        return row_to_recharge_order(order)
+    now = int(time.time())
+    conn.execute(
+        "UPDATE recharge_orders SET status = ?, paid_at = ? WHERE order_no = ?",
+        ("paid", now, order["order_no"]),
+    )
+    conn.execute(
+        "UPDATE users SET recharge_balance = recharge_balance + ? WHERE id = ?",
+        (order["credits"], order["user_id"]),
+    )
+    conn.execute(
+        "INSERT INTO recharge_records (user_id, amount, note, created_at) VALUES (?, ?, ?, ?)",
+        (order["user_id"], order["credits"], note or f"{order['package_name']} 支付成功", now),
+    )
+    paid_order = conn.execute("SELECT * FROM recharge_orders WHERE order_no = ?", (order["order_no"],)).fetchone()
+    return row_to_recharge_order(paid_order)
 
 
 def get_usage_status(conn: DatabaseConnection, user_id: int, username: str) -> UsageStatus:
@@ -757,6 +842,80 @@ async def me(user: sqlite3.Row = Depends(get_current_user)) -> UserPublic:
 async def usage(user: sqlite3.Row = Depends(get_current_user)) -> UsageStatus:
     with get_db() as conn:
         return get_usage_status(conn, user["id"], user["username"])
+
+
+@app.get("/api/recharge/packages", response_model=list[RechargePackage])
+async def list_recharge_packages(user: sqlite3.Row = Depends(get_current_user)) -> list[RechargePackage]:
+    return [
+        RechargePackage(id=package_id, name=package["name"], amount_cents=package["amount_cents"], credits=package["credits"])
+        for package_id, package in RECHARGE_PACKAGES.items()
+    ]
+
+
+@app.post("/api/recharge/orders", response_model=RechargeOrder)
+async def create_recharge_order(
+    request: RechargeOrderCreate,
+    user: sqlite3.Row = Depends(get_current_user),
+) -> RechargeOrder:
+    package = RECHARGE_PACKAGES.get(request.package_id)
+    if not package:
+        raise HTTPException(status_code=404, detail="充值套餐不存在。")
+    now = int(time.time())
+    order_no = create_order_no()
+    with get_db() as conn:
+        insert_and_get_id(
+            conn,
+            """
+            INSERT INTO recharge_orders (
+                order_no, user_id, package_id, package_name, amount_cents,
+                credits, status, provider, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                order_no,
+                user["id"],
+                request.package_id,
+                package["name"],
+                package["amount_cents"],
+                package["credits"],
+                "pending",
+                "mock",
+                now,
+            ),
+        )
+        row = conn.execute("SELECT * FROM recharge_orders WHERE order_no = ?", (order_no,)).fetchone()
+        return row_to_recharge_order(row)
+
+
+@app.get("/api/recharge/orders/{order_no}", response_model=RechargeOrder)
+async def get_recharge_order(
+    order_no: str,
+    user: sqlite3.Row = Depends(get_current_user),
+) -> RechargeOrder:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM recharge_orders WHERE order_no = ? AND user_id = ?",
+            (order_no, user["id"]),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="订单不存在。")
+        return row_to_recharge_order(row)
+
+
+@app.post("/api/recharge/orders/{order_no}/mock-pay", response_model=RechargeOrder)
+async def mock_pay_recharge_order(
+    order_no: str,
+    user: sqlite3.Row = Depends(get_current_user),
+) -> RechargeOrder:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM recharge_orders WHERE order_no = ? AND user_id = ?",
+            (order_no, user["id"]),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="订单不存在。")
+        return mark_recharge_order_paid(conn, row, "模拟支付成功")
 
 
 @app.get("/api/admin/stats", response_model=AdminStats)

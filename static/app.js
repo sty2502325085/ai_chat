@@ -27,6 +27,8 @@ const moreButton = document.querySelector("#more-button");
 const moreMenuPanel = document.querySelector("#more-menu-panel");
 const rechargeModal = document.querySelector("#recharge-modal");
 const rechargeSummary = document.querySelector("#recharge-summary");
+const packageList = document.querySelector("#package-list");
+const rechargeOrderStatus = document.querySelector("#recharge-order-status");
 const rechargeCloseButton = document.querySelector("#recharge-close-button");
 
 const TOKEN_KEY = "ai-chat-token";
@@ -44,6 +46,8 @@ let currentUser = loadSavedUser();
 let sessions = [];
 let activeSessionId = null;
 let usageStatus = null;
+let rechargePackages = [];
+let pendingRechargeOrder = null;
 
 function loadSavedUser() {
   try {
@@ -111,16 +115,85 @@ function closeMoreMenu() {
   toggleMoreMenu(false);
 }
 
-function openRechargeModal() {
+async function openRechargeModal() {
   const balance = usageStatus?.recharge_balance || 0;
   const remaining = usageStatus?.unlimited ? "不限次数" : `${usageStatus?.remaining ?? 0} 次`;
   rechargeSummary.textContent = `当前可用：${remaining}，其中充值余额 ${balance} 次。`;
+  rechargeOrderStatus.textContent = "当前为模拟支付流程，后续可替换为微信支付二维码。";
   rechargeModal.classList.remove("is-hidden");
   closeMoreMenu();
+  await loadRechargePackages();
 }
 
 function closeRechargeModal() {
   rechargeModal.classList.add("is-hidden");
+  pendingRechargeOrder = null;
+}
+
+function formatMoney(cents) {
+  return `¥${(cents / 100).toFixed(2)}`;
+}
+
+function renderRechargePackages() {
+  packageList.innerHTML = "";
+  rechargePackages.forEach((item) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "package-option";
+    button.dataset.packageId = item.id;
+    button.innerHTML = `
+      <span>${item.name}</span>
+      <strong>${item.credits} 次</strong>
+      <small>${formatMoney(item.amount_cents)}</small>
+    `;
+    packageList.appendChild(button);
+  });
+}
+
+async function loadRechargePackages() {
+  if (rechargePackages.length) {
+    renderRechargePackages();
+    return;
+  }
+  packageList.innerHTML = '<p class="empty-inline">套餐加载中...</p>';
+  try {
+    rechargePackages = await api("/api/recharge/packages");
+    renderRechargePackages();
+  } catch (error) {
+    packageList.innerHTML = `<p class="empty-inline">${error.message}</p>`;
+  }
+}
+
+async function createRechargeOrder(packageId) {
+  rechargeOrderStatus.textContent = "正在创建订单...";
+  const order = await api("/api/recharge/orders", {
+    method: "POST",
+    body: JSON.stringify({ package_id: packageId }),
+  });
+  pendingRechargeOrder = order;
+  rechargeOrderStatus.textContent = `订单 ${order.order_no} 已创建：${order.package_name}，${formatMoney(order.amount_cents)}，可获得 ${order.credits} 次。`;
+  renderPendingRechargeOrder(order);
+}
+
+function renderPendingRechargeOrder(order) {
+  packageList.innerHTML = `
+    <div class="mock-order-card">
+      <span>模拟微信支付二维码</span>
+      <strong>${formatMoney(order.amount_cents)}</strong>
+      <small>订单号：${order.order_no}</small>
+      <button id="mock-pay-button" type="button">模拟支付成功</button>
+    </div>
+  `;
+}
+
+async function mockPayRechargeOrder() {
+  if (!pendingRechargeOrder) return;
+  rechargeOrderStatus.textContent = "正在确认支付...";
+  const order = await api(`/api/recharge/orders/${pendingRechargeOrder.order_no}/mock-pay`, { method: "POST", body: "{}" });
+  pendingRechargeOrder = order;
+  rechargeOrderStatus.textContent = `充值成功，已增加 ${order.credits} 次。`;
+  await loadUsage();
+  renderUsage();
 }
 
 function setStatus(text, isError = false) {
@@ -647,7 +720,31 @@ adminButton.addEventListener("click", () => {
   window.location.href = "/admin";
 });
 
-rechargeButton.addEventListener("click", openRechargeModal);
+rechargeButton.addEventListener("click", () => {
+  openRechargeModal().catch((error) => {
+    setStatus(error.message, true);
+  });
+});
+
+packageList.addEventListener("click", async (event) => {
+  const packageButton = event.target.closest("button[data-package-id]");
+  if (packageButton) {
+    try {
+      await createRechargeOrder(packageButton.dataset.packageId);
+    } catch (error) {
+      rechargeOrderStatus.textContent = error.message;
+    }
+    return;
+  }
+
+  if (event.target.closest("#mock-pay-button")) {
+    try {
+      await mockPayRechargeOrder();
+    } catch (error) {
+      rechargeOrderStatus.textContent = error.message;
+    }
+  }
+});
 
 rechargeCloseButton.addEventListener("click", closeRechargeModal);
 
